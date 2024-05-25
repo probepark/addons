@@ -4,7 +4,13 @@
   "slug": "simple_mqtt_ezville_control",
   "url": "https://github.com/dongs0104/addons",
   "description": "MQTT 통신을 활용한 간단화된 EzVille 월패드 컨트롤러",
-  "arch": ["armhf", "armv7", "aarch64", "amd64", "i386"],
+  "arch": [
+    "armhf",
+    "armv7",
+    "aarch64",
+    "amd64",
+    "i386"
+  ],
   "map": [
     "share:rw"
   ],

@@ -370,13 +370,13 @@ def ezville_loop(config):
         msg_length = len(raw_data)
         while k < msg_length:
             # F7로 시작하는 패턴을 패킷으로 분리
-            if raw_data[k : k + 2] == "F7":
+            if raw_data[k: k + 2] == "F7":
                 # 남은 데이터가 최소 패킷 길이를 만족하지 못하면 RESIDUE에 저장 후 종료
                 if k + 10 > msg_length:
                     RESIDUE = raw_data[k:]
                     break
                 else:
-                    data_length = int(raw_data[k + 8 : k + 10], 16)
+                    data_length = int(raw_data[k + 8: k + 10], 16)
                     packet_length = 10 + data_length * 2 + 4
 
                     # 남은 데이터가 예상되는 패킷 길이보다 짧으면 RESIDUE에 저장 후 종료
@@ -384,7 +384,7 @@ def ezville_loop(config):
                         RESIDUE = raw_data[k:]
                         break
                     else:
-                        packet = raw_data[k : k + packet_length]
+                        packet = raw_data[k: k + packet_length]
 
                 # 분리된 패킷이 Valid한 패킷인지 Checksum 확인
                 if packet != checksum(packet):
@@ -396,14 +396,14 @@ def ezville_loop(config):
 
                     # STATE 패킷인지 확인
                     if (
-                        packet[2:4] in STATE_HEADER
-                        and packet[6:8] in STATE_HEADER[packet[2:4]][1]
+                            packet[2:4] in STATE_HEADER
+                            and packet[6:8] in STATE_HEADER[packet[2:4]][1]
                     ):
                         STATE_PACKET = True
                     # ACK 패킷인지 확인
                     elif (
-                        packet[2:4] in ACK_HEADER
-                        and packet[6:8] in ACK_HEADER[packet[2:4]][1]
+                            packet[2:4] in ACK_HEADER
+                            and packet[6:8] in ACK_HEADER[packet[2:4]][1]
                     ):
                         ACK_PACKET = True
 
@@ -438,7 +438,7 @@ def ezville_loop(config):
                                     # State 업데이트까지 진행
                                     onoff = (
                                         "ON"
-                                        if int(packet[10 + 2 * id : 12 + 2 * id], 16) & 1
+                                        if int(packet[10 + 2 * id: 12 + 2 * id], 16) & 1
                                         else "OFF"
                                     )
 
@@ -476,18 +476,18 @@ def ezville_loop(config):
                                         await asyncio.sleep(DISCOVERY_DELAY)
 
                                     setT = str(
-                                        int(packet[16 + 4 * rid : 18 + 4 * rid], 16)
+                                        int(packet[16 + 4 * rid: 18 + 4 * rid], 16)
                                     )
                                     curT = str(
-                                        int(packet[18 + 4 * rid : 20 + 4 * rid], 16)
+                                        int(packet[18 + 4 * rid: 20 + 4 * rid], 16)
                                     )
 
                                     if onoff_state[8 - rid] == "1":
                                         onoff = "heat"
                                     # 외출 모드는 off로
                                     elif (
-                                        onoff_state[8 - rid] == "0"
-                                        and away_state[8 - rid] == "1"
+                                            onoff_state[8 - rid] == "0"
+                                            and away_state[8 - rid] == "1"
                                     ):
                                         onoff = "off"
                                     else:
@@ -541,7 +541,7 @@ def ezville_loop(config):
 
                                         # BIT0: 대기전력 On/Off, BIT1: 자동모드 On/Off
                                         # 위와 같지만 일단 on-off 여부만 판단
-                                        DATA = "{0:024b}".format(int(packet[6 + 6 * id : 12 + 6 * id], 16))
+                                        DATA = "{0:024b}".format(int(packet[6 + 6 * id: 12 + 6 * id], 16))
                                         onoff = "ON" if DATA[3] == "1" else "OFF"
                                         autoonoff = "ON" if DATA[0] == "1" else "OFF"
                                         current = DATA[4:]
@@ -550,10 +550,10 @@ def ezville_loop(config):
                                                 int(x, 2) * pow(10, 3 - i)
                                                 for i, x in enumerate(
                                                     [
-                                                        current[i : i + 4]
+                                                        current[i: i + 4]
                                                         for i in range(
-                                                            0, len(current), 4
-                                                        )
+                                                        0, len(current), 4
+                                                    )
                                                     ]
                                                 )
                                             )
@@ -721,10 +721,10 @@ def ezville_loop(config):
                                 + "01010000"
                             )
                             recvcmd = (
-                                "F7"
-                                + RS485_DEVICE[device]["power"]["id"]
-                                + f"1{idx}"
-                                + RS485_DEVICE[device]["power"]["ack"]
+                                    "F7"
+                                    + RS485_DEVICE[device]["power"]["id"]
+                                    + f"1{idx}"
+                                    + RS485_DEVICE[device]["power"]["ack"]
                             )
                             statcmd = [key, value]
 
@@ -746,10 +746,10 @@ def ezville_loop(config):
                                 + "01010000"
                             )
                             recvcmd = (
-                                "F7"
-                                + RS485_DEVICE[device]["away"]["id"]
-                                + f"1{idx}"
-                                + RS485_DEVICE[device]["away"]["ack"]
+                                    "F7"
+                                    + RS485_DEVICE[device]["away"]["id"]
+                                    + f"1{idx}"
+                                    + RS485_DEVICE[device]["away"]["ack"]
                             )
                             statcmd = [key, value]
 
@@ -789,10 +789,10 @@ def ezville_loop(config):
                             + "0000"
                         )
                         recvcmd = (
-                            "F7"
-                            + RS485_DEVICE[device]["target"]["id"]
-                            + f"1{idx}"
-                            + RS485_DEVICE[device]["target"]["ack"]
+                                "F7"
+                                + RS485_DEVICE[device]["target"]["id"]
+                                + f"1{idx}"
+                                + RS485_DEVICE[device]["target"]["ack"]
                         )
                         statcmd = [key, str(value)]
 
@@ -840,10 +840,10 @@ def ezville_loop(config):
                         + "000000"
                     )
                     recvcmd = (
-                        "F7"
-                        + RS485_DEVICE[device]["power"]["id"]
-                        + f"1{idx}"
-                        + RS485_DEVICE[device]["power"]["ack"]
+                            "F7"
+                            + RS485_DEVICE[device]["power"]["id"]
+                            + f"1{idx}"
+                            + RS485_DEVICE[device]["power"]["ack"]
                     )
                     statcmd = [key, value]
 
@@ -860,7 +860,7 @@ def ezville_loop(config):
 
                 elif device == "plug":
                     pwr = "11" if value == "ON" else "10"
-                    
+
                     sendcmd = checksum(
                         "F7"
                         + RS485_DEVICE[device]["power"]["id"]
@@ -871,10 +871,10 @@ def ezville_loop(config):
                         + "0000"
                     )
                     recvcmd = (
-                        "F7"
-                        + RS485_DEVICE[device]["power"]["id"]
-                        + f"{idx}{sid}"
-                        + RS485_DEVICE[device]["power"]["ack"]
+                            "F7"
+                            + RS485_DEVICE[device]["power"]["id"]
+                            + f"{idx}{sid}"
+                            + RS485_DEVICE[device]["power"]["ack"]
                     )
                     statcmd = [key, value]
 

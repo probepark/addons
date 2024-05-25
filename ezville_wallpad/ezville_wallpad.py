@@ -622,7 +622,7 @@ def serial_new_device(device, packet, idn=None):
         # KTDO: EzVille에 맞게 수정
         grp_id = int(packet[2] >> 4)
         room_count = int((int(packet[4]) - 5) / 2)
-        
+
         for room_id in range(1, room_count + 1):
             payload = DISCOVERY_PAYLOAD[device][0].copy()
             payload["~"] = payload["~"].format(prefix=prefix, grp=grp_id, id=room_id)
@@ -720,13 +720,13 @@ def serial_receive_state(device, packet):
             else:
                 value2 = "OFF"
             for sub_topic, value in zip(
-                ["mode", "away", "target", "current"],
-                [
-                    value1,
-                    value2,
-                    packet[8 + thermostat_id * 2],
-                    packet[9 + thermostat_id * 2],
-                ],
+                    ["mode", "away", "target", "current"],
+                    [
+                        value1,
+                        value2,
+                        packet[8 + thermostat_id * 2],
+                        packet[9 + thermostat_id * 2],
+                    ],
             ):
                 topic = f"{prefix}/{device}/{grp_id}_{thermostat_id}/{sub_topic}/state"
                 if last_topic_list.get(topic) != value:
@@ -740,11 +740,11 @@ def serial_receive_state(device, packet):
         plug_count = int(packet[4] / 3)
         for plug_id in range(1, plug_count + 1):
             for sub_topic, value in zip(
-                ["power", "current"],
-                [
-                    "ON" if packet[plug_id * 3 + 3] & 0x10 else "OFF",
-                    f"{format(packet[plug_id * 3 + 4], 'x')}.{format(packet[plug_id * 3 + 5], 'x')}",
-                ],
+                    ["power", "current"],
+                    [
+                        "ON" if packet[plug_id * 3 + 3] & 0x10 else "OFF",
+                        f"{format(packet[plug_id * 3 + 4], 'x')}.{format(packet[plug_id * 3 + 5], 'x')}",
+                    ],
             ):
                 topic = f"{prefix}/{device}/{grp_id}_{plug_id}/{sub_topic}/state"
                 if last_topic_list.get(topic) != value:
@@ -940,7 +940,7 @@ if __name__ == "__main__":
             thread.daemon = True
             thread.start()
         while True:
-            time.sleep(10**8)
+            time.sleep(10 ** 8)
     elif Options["serial_mode"] == "socket":
         logger.info("initialize socket...")
         conn = EzVilleSocket(Options["socket"]["address"], Options["socket"]["port"])
