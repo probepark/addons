@@ -363,7 +363,7 @@ def ezville_loop(config):
         raw_data = RESIDUE + raw_data
 
         if ew11_log:
-            log("[SIGNAL] receved: {}".format(raw_data))
+            log("[SIGNAL] received: {}".format(raw_data))
 
         k = 0
         cors = []
@@ -1247,7 +1247,7 @@ def ezville_loop(config):
         # Home Assistant 명령 실행 loop 실행
         tasklist.append(loop.create_task(command_loop()))
         # EW11 상태 체크 loop 실행
-        tasklist.append(loop.create_task(ew11_health_loop()))
+        # tasklist.append(loop.create_task(ew11_health_loop()))
 
         # ADDON 정상 시작 Flag 설정
         ADDON_STARTED = True
