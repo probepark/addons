@@ -217,11 +217,17 @@ class EzVilleSocket:
         self._recv_buf = bytearray()
         self._pending_recv = 0
 
+        # 타임아웃 5초로 설정한 후, 초기 패킷이 수신될 때까지 무한 재시도
         self.set_timeout(5.0)
-        data = self._recv_raw(1)
+        while True:
+            try:
+                data = self._recv_raw(1)
+                if data:
+                    logger.info("초기 패킷 수신 성공")
+                    break
+            except socket.timeout as e:
+                logger.warning("초기 패킷 수신 타임아웃 발생, 재시도 중...: %s", e)
         self.set_timeout(None)
-        if not data:
-            logger.critical("no active packet at this socket!")
 
     def _recv_raw(self, count=1):
         return self._soc.recv(count)
