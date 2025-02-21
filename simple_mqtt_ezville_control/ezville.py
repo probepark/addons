@@ -191,7 +191,10 @@ class Config:
                 raise ValueError(f"설정에 {key}가 누락되었습니다.")
 
     def __getitem__(self, key: str) -> Any:
-        return self.data.get(key)
+        return self.data[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.data.get(key, default)
 
 # MQTT 클라이언트 관리
 class MQTTHandler:
