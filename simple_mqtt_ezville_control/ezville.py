@@ -225,8 +225,9 @@ class MQTTHandler:
         else:
             log(f"MQTT 연결 실패: 코드 {rc}", "ERROR")
 
-    def on_disconnect(self, client, userdata, rc):
-        log("MQTT 연결 해제")
+    def on_disconnect(self, client, userdata, rc, *args):
+        """MQTT 연결 해제 콜백: 추가 인자 무시"""
+        log(f"MQTT 연결 해제 (rc={rc})")
         self.online = False
 
     def on_message(self, client, userdata, msg):
@@ -309,7 +310,7 @@ class SocketHandler:
 
 # 디바이스 핸들러
 class DeviceHandler:
-    def __init__(self, mqtt_handler: MQTTHandler):
+    def __init__(self, mqtt_handler: MQTTHandler, config: Config):
         self.mqtt = mqtt_handler
         self.device_state: Dict[str, str] = {}
         self.msg_cache: Dict[str, str] = {}
@@ -317,6 +318,9 @@ class DeviceHandler:
         self.residue = ""
         self.cmd_queue = asyncio.Queue(maxsize=100)
         self.force_update = False
+        # config에서 강제 업데이트 주기와 지속 시간 가져오기
+        self.force_target_time = time.time() + config.get("force_update_period", 300)  # 기본 5분
+        self.force_stop_time = self.force_target_time + config.get("force_update_duration", 60)  # 기본 1분
 
     async def process_ew11(self, raw_data: str):
         raw_data = self.residue + raw_data.upper()
@@ -438,16 +442,16 @@ class DeviceHandler:
             # 강제 업데이트 로직
             timestamp = time.time()
             if timestamp > self.force_target_time and not self.force_update:
-                self.force_stop_time = timestamp + 60  # FORCE_DURATION
+                self.force_stop_time = timestamp + config.get("force_update_duration", 60)
                 self.force_update = True
                 log("상태 강제 업데이트 시작")
 
             if timestamp > self.force_stop_time and self.force_update:
-                self.force_target_time = timestamp + 300  # FORCE_PERIOD
+                self.force_target_time = timestamp + config.get("force_update_period", 300)
                 self.force_update = False
                 log("상태 강제 업데이트 종료")
 
-            # 주기적 대기 (STATE_LOOP_DELAY 예: 0.1초)
+            # 주기적 대기
             await asyncio.sleep(0.1)
 
     async def command_loop(self, comm_mode: str, socket_handler: SocketHandler):
@@ -456,14 +460,14 @@ class DeviceHandler:
             if not self.cmd_queue.empty():
                 send_data = await self.cmd_queue.get()
                 await self.send_to_ew11(send_data, comm_mode, socket_handler)
-            await asyncio.sleep(0.1)  # COMMAND_LOOP_DELAY
+            await asyncio.sleep(0.1)
 
 
 # 메인 루프
 async def main(config: Config):
     mqtt_handler = MQTTHandler(config)
     socket_handler = SocketHandler(config["ew11_server"], config["ew11_port"], config["ew11_buffer_size"])
-    device_handler = DeviceHandler(mqtt_handler)
+    device_handler = DeviceHandler(mqtt_handler, config)  # config 추가 전달
 
     comm_mode = config["mode"]
     await mqtt_handler.start()
