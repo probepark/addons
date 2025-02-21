@@ -158,10 +158,12 @@ STATE_TOPIC = f"{HA_TOPIC}/{{}}/{{}}/state"
 EW11_TOPIC = "ew11"
 EW11_SEND_TOPIC = f"{EW11_TOPIC}/send"
 
+
 # 로깅 함수
 def log(string: str, level: str = "INFO") -> None:
     date = time.strftime("%Y-%m-%d %p %I:%M:%S", time.localtime(time.time()))
     print(f"[{date}] [{level}] {string}")
+
 
 # 체크섬 계산
 def checksum(input_hex: str) -> Optional[str]:
@@ -176,6 +178,7 @@ def checksum(input_hex: str) -> Optional[str]:
     except Exception as e:
         log(f"Checksum 계산 오류: {e}", "ERROR")
         return None
+
 
 # 설정 관리 클래스
 class Config:
@@ -195,6 +198,7 @@ class Config:
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
+
 
 # MQTT 클라이언트 관리
 class MQTTHandler:
@@ -250,6 +254,7 @@ class MQTTHandler:
     def publish(self, topic: str, payload: Any):
         self.client.publish(topic, payload)
 
+
 # 소켓 관리
 class SocketHandler:
     def __init__(self, address: str, port: int, buffer_size: int):
@@ -301,6 +306,7 @@ class SocketHandler:
         if self.socket:
             self.socket.close()
 
+
 # 디바이스 핸들러
 class DeviceHandler:
     def __init__(self, mqtt_handler: MQTTHandler):
@@ -316,16 +322,16 @@ class DeviceHandler:
         raw_data = self.residue + raw_data.upper()
         k = 0
         while k < len(raw_data):
-            if raw_data[k:k+2] == "F7":
+            if raw_data[k:k + 2] == "F7":
                 if k + 10 > len(raw_data):
                     self.residue = raw_data[k:]
                     break
-                data_length = int(raw_data[k+8:k+10], 16)
+                data_length = int(raw_data[k + 8:k + 10], 16)
                 packet_length = 10 + data_length * 2 + 4
                 if k + packet_length > len(raw_data):
                     self.residue = raw_data[k:]
                     break
-                packet = raw_data[k:k+packet_length]
+                packet = raw_data[k:k + packet_length]
                 if packet == checksum(packet):
                     await self.handle_packet(packet)
                 self.residue = ""
@@ -417,6 +423,42 @@ class DeviceHandler:
             await asyncio.sleep(random.uniform(0, 0.2))  # CMD_INTERVAL with RANDOM_BACKOFF
         log(f"명령 실패: {send_data}", "WARNING")
 
+    async def state_update_loop(self, msg_queue: asyncio.Queue):
+        """상태 업데이트 루프: 메시지 처리 및 강제 업데이트 관리"""
+        while True:
+            # 메시지 큐 처리
+            while not msg_queue.empty():
+                msg = await msg_queue.get()
+                topics = msg.topic.split("/")
+                if topics[0] == HA_TOPIC and topics[-1] == "command":
+                    await self.process_ha(topics, msg.payload.decode("utf-8"))
+                elif topics[0] == EW11_TOPIC and topics[-1] == "recv":
+                    await self.process_ew11(msg.payload.hex().upper())
+
+            # 강제 업데이트 로직
+            timestamp = time.time()
+            if timestamp > self.force_target_time and not self.force_update:
+                self.force_stop_time = timestamp + 60  # FORCE_DURATION
+                self.force_update = True
+                log("상태 강제 업데이트 시작")
+
+            if timestamp > self.force_stop_time and self.force_update:
+                self.force_target_time = timestamp + 300  # FORCE_PERIOD
+                self.force_update = False
+                log("상태 강제 업데이트 종료")
+
+            # 주기적 대기 (STATE_LOOP_DELAY 예: 0.1초)
+            await asyncio.sleep(0.1)
+
+    async def command_loop(self, comm_mode: str, socket_handler: SocketHandler):
+        """명령 처리 루프"""
+        while True:
+            if not self.cmd_queue.empty():
+                send_data = await self.cmd_queue.get()
+                await self.send_to_ew11(send_data, comm_mode, socket_handler)
+            await asyncio.sleep(0.1)  # COMMAND_LOOP_DELAY
+
+
 # 메인 루프
 async def main(config: Config):
     mqtt_handler = MQTTHandler(config)
@@ -440,6 +482,7 @@ async def main(config: Config):
     finally:
         mqtt_handler.stop()
         socket_handler.close()
+
 
 if __name__ == "__main__":
     config = Config(f"{CONFIG_DIR}/options.json")
