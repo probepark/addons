@@ -237,8 +237,13 @@ class EzVilleSocket:
 
     def recv(self, count=1):
         if len(self._recv_buf) < count:
-            new_data = self._recv_raw(128)
-            self._recv_buf.extend(new_data)
+            try:
+                new_data = self._recv_raw(128)
+                if not new_data:
+                    raise OSError("소켓 연결 끊김 (recv returned empty)")
+                self._recv_buf.extend(new_data)
+            except socket.timeout:
+                raise  # 타임아웃은 그대로 전파
         if len(self._recv_buf) < count:
             return None
 
@@ -637,6 +642,9 @@ def serial_get_header(conn):
             header_0 = header_1
         header_2 = conn.recv(1)[0]
         header_3 = conn.recv(1)[0]
+    except socket.timeout:
+        # 타임아웃 — 연결은 살아있지만 데이터 없음, 큐 명령 처리 기회 제공
+        return None, None, None, None
     except (OSError, serial.SerialException) as e:
         logger.error("header 수신 중 예외 발생: %s", e)
         return 0, 0, 0, 0
@@ -731,10 +739,26 @@ def daemon(conn):
     logger.info("start loop ...")
     scan_count = 0
     send_aggressive = False
+
+    # 소켓에 타임아웃 설정 — recv 블로킹 방지 (5초)
+    if isinstance(conn, EzVilleSocket):
+        conn.set_timeout(5.0)
+
     while True:
         sys.stdout.flush()
 
         header_0, header_1, header_2, header_3 = serial_get_header(conn)
+
+        # 타임아웃 — 데이터는 없지만 연결은 살아있음, 큐된 명령 처리
+        if header_0 is None:
+            if serial_queue:
+                try:
+                    serial_send_command(conn=conn)
+                except Exception as e:
+                    logger.error("타임아웃 중 명령 송신 실패: %s", e)
+                    raise OSError(f"명령 송신 중 소켓 오류: {e}")
+            continue
+
         if (header_0, header_1, header_2, header_3) == (0, 0, 0, 0):
             # 헤더를 못 읽었으면(에러), 재연결 루프로 빠지도록 예외 발생
             raise OSError("잘못된 헤더 수신(연결 끊김 또는 기타 에러)")
