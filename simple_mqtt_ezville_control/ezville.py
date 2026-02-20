@@ -2,9 +2,10 @@ import paho.mqtt.client as mqtt
 import json
 import time
 import asyncio
-import telnetlib
 import socket
 import random
+import signal
+import sys
 from queue import Queue
 from typing import Dict, List, Any, Tuple, Optional
 
@@ -36,9 +37,7 @@ RS485_DEVICE = {
 
 # MQTT Discovery를 위한 Preset 정보
 DISCOVERY_DEVICE = {
-    "ids": [
-        "ezville_wallpad",
-    ],
+    "ids": ["ezville_wallpad"],
     "name": "ezville_wallpad",
     "mf": "EzVille",
     "mdl": "EzVille Wallpad",
@@ -67,8 +66,7 @@ DISCOVERY_PAYLOAD = {
             "temp_stat_t": "~/setTemp/state",
             "temp_cmd_t": "~/setTemp/command",
             "curr_temp_t": "~/curTemp/state",
-            #        "modes": [ "off", "heat", "fan_only" ],     # 외출 모드는 fan_only로 매핑
-            "modes": ["heat", "off"],  # 외출 모드는 off로 매핑
+            "modes": ["heat", "off"],
             "min_temp": "5",
             "max_temp": "40",
         }
@@ -158,11 +156,15 @@ STATE_TOPIC = f"{HA_TOPIC}/{{}}/{{}}/state"
 EW11_TOPIC = "ew11"
 EW11_SEND_TOPIC = f"{EW11_TOPIC}/send"
 
+# Connection health tracking
+HEALTH_CHECK_INTERVAL = 60  # seconds
+MAX_SILENT_PERIOD = 120  # seconds without data = connection problem
+
 
 # 로깅 함수
 def log(string: str, level: str = "INFO") -> None:
     date = time.strftime("%Y-%m-%d %p %I:%M:%S", time.localtime(time.time()))
-    print(f"[{date}] [{level}] {string}")
+    print(f"[{date}] [{level}] {string}", flush=True)
 
 
 # 체크섬 계산
@@ -202,18 +204,25 @@ class Config:
 
 # MQTT 클라이언트 관리
 class MQTTHandler:
+    RECONNECT_DELAY_MIN = 1
+    RECONNECT_DELAY_MAX = 60
+
     def __init__(self, config: Config):
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, "mqtt-ezville")
         self.client.username_pw_set(config["mqtt_id"], config["mqtt_password"])
         self.client.on_connect = self.on_connect
         self.client.on_disconnect = self.on_disconnect
         self.client.on_message = self.on_message
+        self.client.reconnect_delay_set(self.RECONNECT_DELAY_MIN, self.RECONNECT_DELAY_MAX)
         self.config = config
         self.msg_queue = asyncio.Queue(maxsize=1000)
         self.online = False
+        self._reconnect_count = 0
+        self._last_message_time = time.time()
 
     def on_connect(self, client, userdata, flags, rc, properties):
         if rc == 0:
+            self._reconnect_count = 0
             log("MQTT Broker 연결 성공")
             topics = [(f"{HA_TOPIC}/#", 0), ("homeassistant/status", 0)]
             if self.config["mode"] in ["mixed", "mqtt"]:
@@ -222,15 +231,20 @@ class MQTTHandler:
                 topics.append((f"{EW11_TOPIC}/send", 1))
             client.subscribe(topics)
             self.online = True
+            self._last_message_time = time.time()
         else:
             log(f"MQTT 연결 실패: 코드 {rc}", "ERROR")
 
     def on_disconnect(self, client, userdata, rc, *args):
-        """MQTT 연결 해제 콜백: 추가 인자 무시"""
-        log(f"MQTT 연결 해제 (rc={rc})")
         self.online = False
+        self._reconnect_count += 1
+        if rc != 0:
+            log(f"MQTT 예기치 않은 연결 해제 (rc={rc}), 자동 재연결 시도 #{self._reconnect_count}", "WARNING")
+        else:
+            log("MQTT 정상 연결 해제")
 
     def on_message(self, client, userdata, msg):
+        self._last_message_time = time.time()
         if msg.topic == "homeassistant/status":
             status = msg.payload.decode("utf-8")
             self.online = (status == "online")
@@ -242,70 +256,131 @@ class MQTTHandler:
                 log("메시지 큐가 가득 찼습니다. 메시지 드롭", "WARNING")
 
     async def start(self):
-        self.client.connect_async(self.config["mqtt_server"])
+        self.client.connect_async(self.config["mqtt_server"], keepalive=60)
         self.client.loop_start()
-        while not self.online and self.config.get("reboot_control", False):
-            log("MQTT 연결 대기")
+        # Wait for connection with timeout
+        timeout = 30
+        while not self.online and timeout > 0:
+            log("MQTT 연결 대기...")
             await asyncio.sleep(1)
+            timeout -= 1
+        if not self.online:
+            log("MQTT 초기 연결 타임아웃 — 백그라운드 재연결 진행", "WARNING")
 
     def stop(self):
         self.client.loop_stop()
         self.client.disconnect()
 
     def publish(self, topic: str, payload: Any):
-        self.client.publish(topic, payload)
+        try:
+            result = self.client.publish(topic, payload)
+            if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                log(f"MQTT publish 실패: {topic} rc={result.rc}", "WARNING")
+        except Exception as e:
+            log(f"MQTT publish 예외: {e}", "ERROR")
+
+    @property
+    def seconds_since_last_message(self) -> float:
+        return time.time() - self._last_message_time
 
 
-# 소켓 관리
+# 소켓 관리 (non-blocking asyncio 기반)
 class SocketHandler:
-    def __init__(self, address: str, port: int, buffer_size: int):
+    RECONNECT_DELAY = 3
+    MAX_RECONNECT_DELAY = 60
+
+    def __init__(self, address: str, port: int, buffer_size: int, timeout: float = 30.0):
         self.address = address
         self.port = port
         self.buffer_size = buffer_size
-        self.socket = None
+        self.timeout = timeout
+        self.reader: Optional[asyncio.StreamReader] = None
+        self.writer: Optional[asyncio.StreamWriter] = None
+        self._connected = False
+        self._reconnect_delay = self.RECONNECT_DELAY
+        self._last_data_time = time.time()
 
-    def connect(self) -> socket.socket:
-        retry_count = 0
+    async def connect(self):
+        """비동기 연결 with exponential backoff"""
         while True:
             try:
-                soc = socket.socket()
-                soc.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                soc.settimeout(10)  # 타임아웃 추가
-                soc.connect((self.address, self.port))
-                log("Socket 연결 성공")
-                return soc
-            except (ConnectionRefusedError, socket.timeout) as e:
-                log(f"Socket 연결 실패 ({retry_count}회 재시도): {e}", "ERROR")
-                time.sleep(1)
-                retry_count += 1
+                self.reader, self.writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.address, self.port),
+                    timeout=self.timeout,
+                )
+                self._connected = True
+                self._reconnect_delay = self.RECONNECT_DELAY
+                self._last_data_time = time.time()
+                log(f"Socket 연결 성공: {self.address}:{self.port}")
+                return
+            except (OSError, asyncio.TimeoutError) as e:
+                log(f"Socket 연결 실패: {e}, {self._reconnect_delay}초 후 재시도", "ERROR")
+                await asyncio.sleep(self._reconnect_delay)
+                self._reconnect_delay = min(self._reconnect_delay * 2, self.MAX_RECONNECT_DELAY)
+
+    async def reconnect(self):
+        """재연결"""
+        self._connected = False
+        if self.writer:
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception:
+                pass
+        self.reader = None
+        self.writer = None
+        await self.connect()
 
     async def recv_loop(self, msg_queue: asyncio.Queue):
-        if not self.socket:
-            self.socket = self.connect()
+        """비동기 수신 루프"""
+        await self.connect()
         while True:
             try:
-                data = self.socket.recv(self.buffer_size)
-                if data:
-                    msg = type("MSG", (), {"topic": f"{EW11_TOPIC}/recv", "payload": data})()
-                    await msg_queue.put(msg)
-            except (OSError, socket.timeout):
-                log("Socket 수신 오류, 재연결 시도", "ERROR")
-                self.socket.close()
-                self.socket = self.connect()
-            await asyncio.sleep(0.1)  # SERIAL_RECV_DELAY 대체
+                data = await asyncio.wait_for(self.reader.read(self.buffer_size), timeout=self.timeout)
+                if not data:
+                    log("Socket: 빈 데이터 수신, 연결 끊김 감지", "WARNING")
+                    await self.reconnect()
+                    continue
+                self._last_data_time = time.time()
+                msg = type("MSG", (), {"topic": f"{EW11_TOPIC}/recv", "payload": data})()
+                try:
+                    msg_queue.put_nowait(msg)
+                except asyncio.QueueFull:
+                    log("Socket 메시지 큐 가득참", "WARNING")
+            except asyncio.TimeoutError:
+                # 타임아웃 = 데이터 없음, 연결 확인
+                silent = time.time() - self._last_data_time
+                if silent > MAX_SILENT_PERIOD:
+                    log(f"Socket: {silent:.0f}초 동안 데이터 없음, 재연결", "WARNING")
+                    await self.reconnect()
+            except (OSError, ConnectionResetError) as e:
+                log(f"Socket 수신 오류: {e}, 재연결", "ERROR")
+                await self.reconnect()
 
-    def send(self, data: bytes):
+    async def send(self, data: bytes):
+        """비동기 송신"""
+        if not self._connected or not self.writer:
+            log("Socket 미연결, 재연결 시도", "WARNING")
+            await self.reconnect()
         try:
-            self.socket.sendall(data)
-        except OSError:
-            log("Socket 송신 오류, 재연결", "ERROR")
-            self.socket.close()
-            self.socket = self.connect()
-            self.socket.sendall(data)
+            self.writer.write(data)
+            await self.writer.drain()
+        except (OSError, ConnectionResetError) as e:
+            log(f"Socket 송신 오류: {e}, 재연결", "ERROR")
+            await self.reconnect()
+            try:
+                self.writer.write(data)
+                await self.writer.drain()
+            except Exception as e2:
+                log(f"Socket 재송신 실패: {e2}", "ERROR")
 
-    def close(self):
-        if self.socket:
-            self.socket.close()
+    async def close(self):
+        if self.writer:
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception:
+                pass
 
 
 # 디바이스 핸들러
@@ -318,9 +393,11 @@ class DeviceHandler:
         self.residue = ""
         self.cmd_queue = asyncio.Queue(maxsize=100)
         self.force_update = False
-        # config에서 강제 업데이트 주기와 지속 시간 가져오기
-        self.force_target_time = time.time() + config.get("force_update_period", 300)  # 기본 5분
-        self.force_stop_time = self.force_target_time + config.get("force_update_duration", 60)  # 기본 1분
+        self.config = config
+        self.force_target_time = time.time() + config.get("force_update_period", 300)
+        self.force_stop_time = self.force_target_time + config.get("force_update_duration", 60)
+        self._packet_count = 0
+        self._error_count = 0
 
     async def process_ew11(self, raw_data: str):
         raw_data = self.residue + raw_data.upper()
@@ -337,7 +414,12 @@ class DeviceHandler:
                     break
                 packet = raw_data[k:k + packet_length]
                 if packet == checksum(packet):
+                    self._packet_count += 1
                     await self.handle_packet(packet)
+                else:
+                    self._error_count += 1
+                    if self._error_count % 100 == 0:
+                        log(f"체크섬 오류 누적: {self._error_count}건", "WARNING")
                 self.residue = ""
                 k += packet_length
             else:
@@ -356,7 +438,10 @@ class DeviceHandler:
             device_name = STATE_HEADER.get(device_id, ACK_HEADER.get(device_id))[0]
             handler = getattr(self, f"handle_{device_name}", None)
             if handler:
-                await handler(packet, state_packet)
+                try:
+                    await handler(packet, state_packet)
+                except Exception as e:
+                    log(f"패킷 처리 오류 ({device_name}): {e}", "ERROR")
             if state_packet:
                 self.msg_cache[packet[:10]] = packet[10:]
 
@@ -370,12 +455,90 @@ class DeviceHandler:
                 payload = DISCOVERY_PAYLOAD["light"][0].copy()
                 payload.update({"~": f"ezville/{name}", "name": name, "device": DISCOVERY_DEVICE, "uniq_id": name})
                 await self.mqtt_discovery(payload)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(self.config.get("discovery_delay", 0.2))
             onoff = "ON" if int(packet[10 + 2 * id:12 + 2 * id], 16) & 1 else "OFF"
             await self.update_state("light", "power", rid, id, onoff)
 
-    # 다른 디바이스 핸들러 (thermostat, plug 등)는 유사하게 구현
-    # 예시로 생략, 전체 코드에서 구현
+    async def handle_thermostat(self, packet: str, state_packet: bool):
+        rid = int(packet[5], 16)
+        slc = int(packet[8:10], 16)
+        for id in range(1, slc):
+            name = f"thermostat_{rid:02d}_{id:02d}"
+            if name not in self.discovery_list:
+                self.discovery_list.append(name)
+                payload = DISCOVERY_PAYLOAD["thermostat"][0].copy()
+                payload.update({"~": f"ezville/{name}", "name": name, "device": DISCOVERY_DEVICE, "uniq_id": name})
+                await self.mqtt_discovery(payload)
+                await asyncio.sleep(self.config.get("discovery_delay", 0.2))
+            offset = 10 + (id - 1) * 8
+            onoff_byte = int(packet[offset:offset + 2], 16)
+            set_temp = int(packet[offset + 2:offset + 4], 16)
+            cur_temp = int(packet[offset + 4:offset + 6], 16)
+            if onoff_byte & 0x01:
+                mode = "heat"
+            else:
+                mode = "off"
+            await self.update_state("thermostat", "power", rid, id, mode)
+            await self.update_state("thermostat", "setTemp", rid, id, str(set_temp))
+            await self.update_state("thermostat", "curTemp", rid, id, str(cur_temp))
+
+    async def handle_plug(self, packet: str, state_packet: bool):
+        rid = int(packet[5], 16)
+        slc = int(packet[8:10], 16)
+        for id in range(1, slc):
+            name = f"plug_{rid:02d}_{id:02d}"
+            if name not in self.discovery_list:
+                self.discovery_list.append(name)
+                for p in DISCOVERY_PAYLOAD["plug"]:
+                    payload = p.copy()
+                    intg_name = name if "_intg" not in ["binary_sensor", "sensor"] else f"{name}_{p.get('name', '').split('_')[-1]}"
+                    payload.update({
+                        "~": f"ezville/{name}",
+                        "name": payload["name"].format(rid, id),
+                        "device": DISCOVERY_DEVICE,
+                        "uniq_id": payload["name"].format(rid, id),
+                    })
+                    await self.mqtt_discovery(payload)
+                    await asyncio.sleep(self.config.get("discovery_delay", 0.2))
+            offset = 10 + (id - 1) * 8
+            onoff = "ON" if int(packet[offset:offset + 2], 16) & 1 else "OFF"
+            auto = "ON" if int(packet[offset:offset + 2], 16) & 2 else "OFF"
+            current = int(packet[offset + 2:offset + 4], 16) * 256 + int(packet[offset + 4:offset + 6], 16)
+            await self.update_state("plug", "power", rid, id, onoff)
+            await self.update_state("plug", "auto", rid, id, auto)
+            await self.update_state("plug", "current", rid, id, str(current))
+
+    async def handle_gasvalve(self, packet: str, state_packet: bool):
+        rid = int(packet[5], 16)
+        name = f"gasvalve_{rid:02d}_01"
+        if name not in self.discovery_list:
+            self.discovery_list.append(name)
+            payload = DISCOVERY_PAYLOAD["gasvalve"][0].copy()
+            payload.update({"~": f"ezville/{name}", "name": name, "device": DISCOVERY_DEVICE, "uniq_id": name})
+            await self.mqtt_discovery(payload)
+            await asyncio.sleep(self.config.get("discovery_delay", 0.2))
+        onoff = "ON" if int(packet[10:12], 16) & 1 else "OFF"
+        await self.update_state("gasvalve", "power", rid, 1, onoff)
+
+    async def handle_batch(self, packet: str, state_packet: bool):
+        rid = int(packet[5], 16)
+        name = f"batch_{rid:02d}_01"
+        if name not in self.discovery_list:
+            self.discovery_list.append(name)
+            for p in DISCOVERY_PAYLOAD["batch"]:
+                payload = p.copy()
+                payload.update({
+                    "~": f"ezville/{name}",
+                    "name": payload["name"].format(rid, 1),
+                    "device": DISCOVERY_DEVICE,
+                    "uniq_id": payload["name"].format(rid, 1),
+                })
+                await self.mqtt_discovery(payload)
+                await asyncio.sleep(self.config.get("discovery_delay", 0.2))
+        group = "ON" if int(packet[10:12], 16) & 1 else "OFF"
+        outing = "ON" if int(packet[10:12], 16) & 2 else "OFF"
+        await self.update_state("batch", "group", rid, 1, group)
+        await self.update_state("batch", "outing", rid, 1, outing)
 
     async def mqtt_discovery(self, payload: Dict[str, Any]):
         intg = payload.pop("_intg")
@@ -389,7 +552,6 @@ class DeviceHandler:
             self.device_state[key] = value
             topic = STATE_TOPIC.format(f"{device}_{id1:02d}_{id2:02d}", state)
             self.mqtt.publish(topic, value.encode())
-            log(f"상태 업데이트: {topic} -> {value}")
 
     async def process_ha(self, topics: List[str], value: str):
         device_info = topics[1].split("_")
@@ -400,7 +562,10 @@ class DeviceHandler:
             generator = getattr(self, f"generate_{device}_cmd", None)
             if generator:
                 sendcmd, recvcmd, statcmd = generator(idx, sid, topics[2], value)
-                await self.cmd_queue.put({"sendcmd": sendcmd, "recvcmd": recvcmd, "statcmd": statcmd})
+                try:
+                    self.cmd_queue.put_nowait({"sendcmd": sendcmd, "recvcmd": recvcmd, "statcmd": statcmd})
+                except asyncio.QueueFull:
+                    log("명령 큐 가득참", "WARNING")
 
     def generate_light_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
         pwr = "01" if value == "ON" else "00"
@@ -411,63 +576,152 @@ class DeviceHandler:
         statcmd = [f"light_{idx:02d}_{sid:02d}power", value]
         return sendcmd, recvcmd, statcmd
 
-    # 다른 명령 생성 함수도 유사하게 구현
+    def generate_thermostat_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
+        if subtopic == "power":
+            if value == "heat":
+                sendcmd = checksum(f"F7361{idx}43020{sid}01000000")
+            elif value == "off":
+                sendcmd = checksum(f"F7361{idx}43020{sid}04000000")
+            else:
+                sendcmd = checksum(f"F7361{idx}43020{sid}00000000")
+            recvcmd = f"F7361{idx}C3"
+            statcmd = [f"thermostat_{idx:02d}_{sid:02d}power", value]
+        elif subtopic == "setTemp":
+            temp = int(float(value))
+            sendcmd = checksum(f"F7361{idx}44020{sid}{temp:02X}000000")
+            recvcmd = f"F7361{idx}C4"
+            statcmd = [f"thermostat_{idx:02d}_{sid:02d}setTemp", str(temp)]
+        else:
+            return None, None, ["", "NULL"]
+        return sendcmd, recvcmd, statcmd
+
+    def generate_plug_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
+        pwr = "01" if value == "ON" else "00"
+        sendcmd = checksum(f"F7391{idx}41030{sid}{pwr}000000")
+        recvcmd = f"F7391{idx}C1"
+        statcmd = [f"plug_{idx:02d}_{sid:02d}power", value]
+        return sendcmd, recvcmd, statcmd
+
+    def generate_gasvalve_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
+        sendcmd = checksum(f"F7121{idx}41020100000000")
+        recvcmd = f"F7121{idx}C1"
+        statcmd = [f"gasvalve_{idx:02d}_{sid:02d}power", value]
+        return sendcmd, recvcmd, statcmd
+
+    def generate_batch_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
+        if subtopic == "elevator-up":
+            sendcmd = checksum(f"F7331{idx}41020103000000")
+        elif subtopic == "elevator-down":
+            sendcmd = checksum(f"F7331{idx}41020104000000")
+        else:
+            return None, None, ["", "NULL"]
+        recvcmd = f"F7331{idx}C1"
+        statcmd = [f"batch_{idx:02d}_{sid:02d}{subtopic}", "NULL"]
+        return sendcmd, recvcmd, statcmd
 
     async def send_to_ew11(self, send_data: Dict[str, Any], comm_mode: str, socket_handler: SocketHandler):
-        for _ in range(3):  # CMD_RETRY_COUNT
-            if comm_mode == "mqtt":
-                self.mqtt.publish(EW11_SEND_TOPIC, bytes.fromhex(send_data["sendcmd"]))
-            else:
-                socket_handler.send(bytes.fromhex(send_data["sendcmd"]))
+        if not send_data.get("sendcmd"):
+            return
+        retry_count = self.config.get("command_retry_count", 30)
+        first_wait = self.config.get("first_waittime", 0.5)
+        use_backoff = self.config.get("random_backoff", True)
+        cmd_interval = self.config.get("command_interval", 0.5)
+
+        for attempt in range(retry_count):
+            try:
+                if comm_mode == "mqtt":
+                    self.mqtt.publish(EW11_SEND_TOPIC, bytes.fromhex(send_data["sendcmd"]))
+                else:
+                    await socket_handler.send(bytes.fromhex(send_data["sendcmd"]))
+            except Exception as e:
+                log(f"명령 송신 오류 (attempt {attempt + 1}): {e}", "ERROR")
+                await asyncio.sleep(1)
+                continue
+
             if send_data["statcmd"][1] == "NULL":
                 return
-            await asyncio.sleep(0.5)  # FIRST_WAITTIME
+            await asyncio.sleep(first_wait)
             if send_data["statcmd"][1] == self.device_state.get(send_data["statcmd"][0]):
                 return
-            await asyncio.sleep(random.uniform(0, 0.2))  # CMD_INTERVAL with RANDOM_BACKOFF
-        log(f"명령 실패: {send_data}", "WARNING")
+            if use_backoff:
+                await asyncio.sleep(random.uniform(0, cmd_interval))
+            else:
+                await asyncio.sleep(cmd_interval)
+        log(f"명령 실패 ({retry_count}회 시도): {send_data.get('sendcmd', '')[:20]}...", "WARNING")
 
     async def state_update_loop(self, msg_queue: asyncio.Queue):
-        """상태 업데이트 루프: 메시지 처리 및 강제 업데이트 관리"""
+        state_delay = self.config.get("state_loop_delay", 0.2)
         while True:
-            # 메시지 큐 처리
-            while not msg_queue.empty():
-                msg = await msg_queue.get()
-                topics = msg.topic.split("/")
-                if topics[0] == HA_TOPIC and topics[-1] == "command":
-                    await self.process_ha(topics, msg.payload.decode("utf-8"))
-                elif topics[0] == EW11_TOPIC and topics[-1] == "recv":
-                    await self.process_ew11(msg.payload.hex().upper())
+            try:
+                # Process messages with timeout
+                try:
+                    msg = await asyncio.wait_for(msg_queue.get(), timeout=state_delay)
+                    topics = msg.topic.split("/")
+                    if topics[0] == HA_TOPIC and topics[-1] == "command":
+                        await self.process_ha(topics, msg.payload.decode("utf-8"))
+                    elif topics[0] == EW11_TOPIC and topics[-1] == "recv":
+                        await self.process_ew11(msg.payload.hex().upper())
+                except asyncio.TimeoutError:
+                    pass
 
-            # 강제 업데이트 로직
-            timestamp = time.time()
-            if timestamp > self.force_target_time and not self.force_update:
-                self.force_stop_time = timestamp + config.get("force_update_duration", 60)
-                self.force_update = True
-                log("상태 강제 업데이트 시작")
+                # 강제 업데이트 로직
+                timestamp = time.time()
+                if timestamp > self.force_target_time and not self.force_update:
+                    self.force_stop_time = timestamp + self.config.get("force_update_duration", 60)
+                    self.force_update = True
+                    log("상태 강제 업데이트 시작")
 
-            if timestamp > self.force_stop_time and self.force_update:
-                self.force_target_time = timestamp + config.get("force_update_period", 300)
-                self.force_update = False
-                log("상태 강제 업데이트 종료")
+                if timestamp > self.force_stop_time and self.force_update:
+                    self.force_target_time = timestamp + self.config.get("force_update_period", 300)
+                    self.force_update = False
+                    log(f"상태 강제 업데이트 종료 (패킷: {self._packet_count}, 오류: {self._error_count})")
 
-            # 주기적 대기
-            await asyncio.sleep(0.1)
+            except Exception as e:
+                log(f"상태 업데이트 루프 오류: {e}", "ERROR")
+                await asyncio.sleep(1)
 
     async def command_loop(self, comm_mode: str, socket_handler: SocketHandler):
-        """명령 처리 루프"""
+        cmd_delay = self.config.get("command_loop_delay", 0.2)
         while True:
-            if not self.cmd_queue.empty():
-                send_data = await self.cmd_queue.get()
+            try:
+                send_data = await asyncio.wait_for(self.cmd_queue.get(), timeout=cmd_delay)
                 await self.send_to_ew11(send_data, comm_mode, socket_handler)
-            await asyncio.sleep(0.1)
+            except asyncio.TimeoutError:
+                pass
+            except Exception as e:
+                log(f"명령 루프 오류: {e}", "ERROR")
+                await asyncio.sleep(1)
+
+
+# 헬스체크 루프
+async def health_check_loop(mqtt_handler: MQTTHandler, socket_handler: SocketHandler, config: Config):
+    """주기적 헬스체크 — MQTT 및 Socket 연결 상태 모니터링"""
+    while True:
+        await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+        # MQTT health
+        if not mqtt_handler.online:
+            log(f"헬스체크: MQTT 오프라인 (재연결 #{mqtt_handler._reconnect_count})", "WARNING")
+        elif mqtt_handler.seconds_since_last_message > MAX_SILENT_PERIOD:
+            log(f"헬스체크: MQTT 메시지 {mqtt_handler.seconds_since_last_message:.0f}초 동안 없음", "WARNING")
+
+        # Reboot control
+        if config.get("reboot_control", False):
+            reboot_delay = config.get("reboot_delay", 300)
+            if mqtt_handler.seconds_since_last_message > reboot_delay:
+                log(f"MQTT {reboot_delay}초 동안 메시지 없음 — 프로세스 재시작", "ERROR")
+                sys.exit(1)  # HA will auto-restart the addon
 
 
 # 메인 루프
 async def main(config: Config):
     mqtt_handler = MQTTHandler(config)
-    socket_handler = SocketHandler(config["ew11_server"], config["ew11_port"], config["ew11_buffer_size"])
-    device_handler = DeviceHandler(mqtt_handler, config)  # config 추가 전달
+    socket_handler = SocketHandler(
+        config["ew11_server"],
+        config["ew11_port"],
+        config["ew11_buffer_size"],
+        timeout=config.get("ew11_timeout", 30),
+    )
+    device_handler = DeviceHandler(mqtt_handler, config)
 
     comm_mode = config["mode"]
     await mqtt_handler.start()
@@ -475,19 +729,35 @@ async def main(config: Config):
     tasks = [
         asyncio.create_task(device_handler.state_update_loop(mqtt_handler.msg_queue)),
         asyncio.create_task(device_handler.command_loop(comm_mode, socket_handler)),
+        asyncio.create_task(health_check_loop(mqtt_handler, socket_handler, config)),
     ]
-    if comm_mode == "socket":
+    if comm_mode in ["socket", "mixed"]:
         tasks.append(asyncio.create_task(socket_handler.recv_loop(mqtt_handler.msg_queue)))
+
+    # Graceful shutdown
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: [t.cancel() for t in tasks])
 
     try:
         await asyncio.gather(*tasks)
     except asyncio.CancelledError:
-        log("Task 종료")
+        log("정상 종료")
+    except Exception as e:
+        log(f"예기치 않은 오류: {e}", "ERROR")
     finally:
         mqtt_handler.stop()
-        socket_handler.close()
+        await socket_handler.close()
 
 
 if __name__ == "__main__":
+    log("=== EzVille Wallpad Control 시작 ===")
     config = Config(f"{CONFIG_DIR}/options.json")
-    asyncio.run(main(config))
+    log(f"모드: {config['mode']}, MQTT: {config['mqtt_server']}, EW11: {config['ew11_server']}:{config['ew11_port']}")
+    try:
+        asyncio.run(main(config))
+    except KeyboardInterrupt:
+        log("사용자 종료")
+    except Exception as e:
+        log(f"치명적 오류: {e}", "ERROR")
+        sys.exit(1)
