@@ -586,23 +586,27 @@ def serial_receive_state(device, packet):
         grp_id = int(packet[2] >> 4)
         room_count = int((int(packet[4]) - 5) / 2)
         for thermostat_id in range(1, room_count + 1):
-            # 예: packet[6], packet[7] 등을 마스크해서 스위칭 상태 확인
-            if ((packet[6] & 0x1F) >> (room_count - thermostat_id)) & 1:
-                value1 = "ON"
-            else:
-                value1 = "OFF"
+            # power on/off: packet[7] bitmask (1=ON)
             if ((packet[7] & 0x1F) >> (room_count - thermostat_id)) & 1:
-                value2 = "ON"
+                power_mode = "heat"
             else:
-                value2 = "OFF"
+                power_mode = "off"
+            # away mode: packet[6] bitmask
+            if ((packet[6] & 0x1F) >> (room_count - thermostat_id)) & 1:
+                away_val = "ON"
+            else:
+                away_val = "OFF"
+
+            target_temp = packet[8 + thermostat_id * 2]
+            current_temp = packet[9 + thermostat_id * 2]
 
             for sub_topic, value in zip(
-                ["mode", "away", "target", "current"],
+                ["power", "away", "target", "current"],
                 [
-                    value1,
-                    value2,
-                    packet[8 + thermostat_id * 2],
-                    packet[9 + thermostat_id * 2],
+                    power_mode,
+                    away_val,
+                    target_temp,
+                    current_temp,
                 ],
             ):
                 topic = f"{prefix}/{device}/{grp_id}_{thermostat_id}/{sub_topic}/state"
