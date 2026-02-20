@@ -213,6 +213,7 @@ class MQTTHandler:
         self.client.on_connect = self.on_connect
         self.client.on_disconnect = self.on_disconnect
         self.client.on_message = self.on_message
+        self.client.on_subscribe = self.on_subscribe
         self.client.reconnect_delay_set(self.RECONNECT_DELAY_MIN, self.RECONNECT_DELAY_MAX)
         self.config = config
         self.msg_queue = asyncio.Queue(maxsize=1000)
@@ -223,17 +224,21 @@ class MQTTHandler:
     def on_connect(self, client, userdata, flags, rc, properties):
         if rc == 0:
             self._reconnect_count = 0
-            log("MQTT Broker 연결 성공")
+            session_present = flags.get('session present', 0) if isinstance(flags, dict) else getattr(flags, 'session_present', 0)
+            log(f"MQTT Broker 연결 성공 (session_present={session_present})")
             topics = [(f"{HA_TOPIC}/#", 0), ("homeassistant/status", 0)]
             if self.config["mode"] in ["mixed", "mqtt"]:
                 topics.append((f"{EW11_TOPIC}/recv", 0))
             if self.config["mode"] == "mqtt":
                 topics.append((f"{EW11_TOPIC}/send", 1))
-            client.subscribe(topics)
+            result = client.subscribe(topics)
+            log(f"MQTT 구독 요청: {[t[0] for t in topics]}, result={result}")
             self.online = True
             self._last_message_time = time.time()
         else:
-            log(f"MQTT 연결 실패: 코드 {rc}", "ERROR")
+            RC_CODES = {1: "프로토콜 버전 불일치", 2: "클라이언트ID 거부", 3: "브로커 불가",
+                        4: "인증 실패", 5: "권한 없음"}
+            log(f"MQTT 연결 실패: rc={rc} ({RC_CODES.get(rc, '알 수 없음')})", "ERROR")
 
     def on_disconnect(self, client, userdata, rc, *args):
         self.online = False
@@ -243,8 +248,17 @@ class MQTTHandler:
         else:
             log("MQTT 정상 연결 해제")
 
+    def on_subscribe(self, client, userdata, mid, granted_qos, *args):
+        log(f"MQTT 구독 확인: mid={mid}, granted_qos={granted_qos}")
+
     def on_message(self, client, userdata, msg):
         self._last_message_time = time.time()
+        if not hasattr(self, '_msg_count'):
+            self._msg_count = 0
+            self._msg_count_by_topic = {}
+        self._msg_count += 1
+        topic_key = msg.topic.split('/')[0]
+        self._msg_count_by_topic[topic_key] = self._msg_count_by_topic.get(topic_key, 0) + 1
         if msg.topic == "homeassistant/status":
             status = msg.payload.decode("utf-8")
             self.online = (status == "online")
@@ -710,7 +724,14 @@ async def health_check_loop(mqtt_handler: MQTTHandler, socket_handler: SocketHan
         if not mqtt_handler.online:
             log(f"헬스체크: MQTT 오프라인 (재연결 #{mqtt_handler._reconnect_count})", "WARNING")
         elif silent_seconds > MAX_SILENT_PERIOD:
-            log(f"헬스체크: MQTT 메시지 {silent_seconds:.0f}초 동안 없음", "WARNING")
+            # 진단 정보 포함
+            msg_count = getattr(mqtt_handler, '_msg_count', 0)
+            msg_by_topic = getattr(mqtt_handler, '_msg_count_by_topic', {})
+            mqtt_connected = mqtt_handler.client.is_connected() if hasattr(mqtt_handler.client, 'is_connected') else 'unknown'
+            log(f"헬스체크: MQTT 메시지 {silent_seconds:.0f}초 동안 없음 | "
+                f"총수신={msg_count}, 토픽별={msg_by_topic}, "
+                f"connected={mqtt_connected}, reconnect횟수={mqtt_handler._reconnect_count}",
+                "WARNING")
 
         # 자동 복구: N초 동안 데이터 없으면 MQTT reconnect + 재구독
         recovery_interval = config.get("recovery_interval", RECOVERY_INTERVAL)
@@ -722,28 +743,46 @@ async def health_check_loop(mqtt_handler: MQTTHandler, socket_handler: SocketHan
                 log(f"복구 {recovery_attempts-1}회 실패 — 프로세스 재시작", "ERROR")
                 sys.exit(1)  # HA will auto-restart the addon
 
-            log(f"자동 복구 시도 #{recovery_attempts}: MQTT 재연결 + 재구독", "WARNING")
-            try:
-                # Step 1: MQTT disconnect + reconnect (forces resubscription via on_connect)
-                mqtt_handler.client.disconnect()
-                await asyncio.sleep(2)
-                mqtt_handler.client.reconnect()
-                log("MQTT 재연결 완료", "INFO")
-            except Exception as e:
-                log(f"MQTT 재연결 실패: {e}", "ERROR")
+            msg_count = getattr(mqtt_handler, '_msg_count', 0)
+            msg_by_topic = getattr(mqtt_handler, '_msg_count_by_topic', {})
+            log(f"자동 복구 시도 #{recovery_attempts}: "
+                f"silent={silent_seconds:.0f}초, 총수신={msg_count}, 토픽별={msg_by_topic}, "
+                f"reconnect횟수={mqtt_handler._reconnect_count}", "WARNING")
 
-            # Step 2: EW11 TCP ping — 장치가 살아있는지 확인
+            # Step 1: EW11 TCP ping — 장치가 살아있는지 확인
+            ew11_host = config["ew11_server"]
+            ew11_port = config["ew11_port"]
             try:
-                ew11_host = config["ew11_server"]
-                ew11_port = config["ew11_port"]
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(ew11_host, ew11_port), timeout=5
                 )
+                # 데이터 수신 시도 (1초 대기)
+                try:
+                    probe_data = await asyncio.wait_for(reader.read(256), timeout=2)
+                    if probe_data:
+                        log(f"EW11 TCP 연결 확인: {ew11_host}:{ew11_port} 정상, "
+                            f"수신 {len(probe_data)}바이트: {probe_data[:20].hex()}", "INFO")
+                    else:
+                        log(f"EW11 TCP 연결 확인: {ew11_host}:{ew11_port} 연결됨, 데이터 없음", "WARNING")
+                except asyncio.TimeoutError:
+                    log(f"EW11 TCP 연결 확인: {ew11_host}:{ew11_port} 연결됨, 2초 내 데이터 없음", "WARNING")
                 writer.close()
                 await writer.wait_closed()
-                log(f"EW11 TCP 연결 확인: {ew11_host}:{ew11_port} 정상", "INFO")
             except Exception as e:
-                log(f"EW11 TCP 연결 실패: {e} — 장치 확인 필요", "ERROR")
+                log(f"EW11 TCP 연결 실패: {e} — 장치 전원/네트워크 확인 필요", "ERROR")
+
+            # Step 2: MQTT disconnect + reconnect (forces resubscription via on_connect)
+            try:
+                mqtt_connected_before = mqtt_handler.client.is_connected() if hasattr(mqtt_handler.client, 'is_connected') else 'unknown'
+                log(f"MQTT 재연결 시작 (현재 connected={mqtt_connected_before})")
+                mqtt_handler.client.disconnect()
+                await asyncio.sleep(2)
+                mqtt_handler.client.reconnect()
+                await asyncio.sleep(3)  # on_connect 콜백 대기
+                mqtt_connected_after = mqtt_handler.client.is_connected() if hasattr(mqtt_handler.client, 'is_connected') else 'unknown'
+                log(f"MQTT 재연결 완료 (connected={mqtt_connected_after})", "INFO")
+            except Exception as e:
+                log(f"MQTT 재연결 실패: {e}", "ERROR")
 
         # 데이터 수신 복구 시 카운터 리셋
         if silent_seconds < MAX_SILENT_PERIOD and recovery_attempts > 0:
