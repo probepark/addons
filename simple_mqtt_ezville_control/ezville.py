@@ -632,9 +632,16 @@ class DeviceHandler:
             self.mqtt.publish(topic, value.encode())
 
     async def process_ha(self, topics: List[str], value: str):
+        if len(topics) < 3:
+            return
         device_info = topics[1].split("_")
+        if len(device_info) < 3:
+            return
         device = device_info[0]
-        idx, sid = int(device_info[1]), int(device_info[2])
+        try:
+            idx, sid = int(device_info[1]), int(device_info[2])
+        except (ValueError, IndexError):
+            return
         key = f"{topics[1]}{topics[2]}"
         if device in RS485_DEVICE and value != self.device_state.get(key):
             generator = getattr(self, f"generate_{device}_cmd", None)
@@ -681,19 +688,23 @@ class DeviceHandler:
         return sendcmd, recvcmd, statcmd
 
     def generate_gasvalve_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
-        sendcmd = checksum(f"F7121{idx}41020100000000")
-        recvcmd = f"F7121{idx}C1"
+        # Fix: gasvalve polling sub_id is 0{idx} (e.g., 01), not 1{idx}
+        sendcmd = checksum(f"F7120{idx}41020100000000")
+        recvcmd = f"F7120{idx}C1"
         statcmd = [f"gasvalve_{idx:02d}_{sid:02d}power", value]
         return sendcmd, recvcmd, statcmd
 
     def generate_batch_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
+        # Fix: sub_id from polling is 0{idx} (e.g., 01), not 1{idx} (e.g., 11)
+        # Polling packet: F7 33 01 81 03 00 04 00 → sub_id=01, rid=int('1',16)=1
+        # Command must use same sub_id format: F7 33 0{idx} 41 ...
         if subtopic == "elevator-up":
-            sendcmd = checksum(f"F7331{idx}41020103000000")
+            sendcmd = checksum(f"F7330{idx}41020103000000")
         elif subtopic == "elevator-down":
-            sendcmd = checksum(f"F7331{idx}41020104000000")
+            sendcmd = checksum(f"F7330{idx}41020104000000")
         else:
             return None, None, ["", "NULL"]
-        recvcmd = f"F7331{idx}C1"
+        recvcmd = f"F7330{idx}C1"
         statcmd = [f"batch_{idx:02d}_{sid:02d}{subtopic}", "NULL"]
         return sendcmd, recvcmd, statcmd
 
