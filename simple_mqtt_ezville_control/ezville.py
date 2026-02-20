@@ -33,6 +33,10 @@ RS485_DEVICE = {
         "state": {"id": "33", "cmd": "81"},
         "press": {"id": "33", "cmd": "41", "ack": "C1"},
     },
+    "door": {
+        "state": {"id": "40", "cmd": "82"},
+        "open": {"id": "40", "cmd": "10", "ack": "90"},
+    },
 }
 
 # MQTT Discovery를 위한 Preset 정보
@@ -133,6 +137,18 @@ DISCOVERY_PAYLOAD = {
             "name": "ezville_batch-outing_{:0>2d}_{:0>2d}",
             "stat_t": "~/outing/state",
             "icon": "mdi:home-circle",
+        },
+    ],
+    "door": [
+        {
+            "_intg": "lock",
+            "~": "ezville/door_{:0>2d}_{:0>2d}",
+            "name": "ezville_door_{:0>2d}_{:0>2d}",
+            "stat_t": "~/lock/state",
+            "cmd_t": "~/lock/command",
+            "icon": "mdi:door",
+            "pl_lock": "LOCK",
+            "pl_unlk": "UNLOCK",
         },
     ],
 }
@@ -554,6 +570,48 @@ class DeviceHandler:
         await self.update_state("batch", "group", rid, 1, group)
         await self.update_state("batch", "outing", rid, 1, outing)
 
+    async def handle_door(self, packet: str, state_packet: bool):
+        """현관문 상태 처리 (device_id=0x40)
+        
+        Packet structure (captured via RS485 analysis):
+          State (cmd=0x82): F7 40 02 82 02 00 00 35 F2
+            - packet[10:12] = door state byte
+          Events:
+            cmd=0x10: door open command
+            cmd=0x90: door open ACK
+            cmd=0x13: door opened state
+            cmd=0x93: door opened ACK
+            cmd=0x12: door closing
+            cmd=0x92: door closing ACK
+            cmd=0x22: door locked
+            cmd=0xA2: door locked ACK
+            cmd=0x11: door back to idle
+            cmd=0x91: door idle ACK
+        """
+        rid = int(packet[5], 16)
+        name = f"door_{rid:02d}_01"
+        if name not in self.discovery_list:
+            self.discovery_list.append(name)
+            for p in DISCOVERY_PAYLOAD["door"]:
+                payload = p.copy()
+                payload.update({
+                    "~": f"ezville/{name}",
+                    "name": payload["name"].format(rid, 1),
+                    "device": DISCOVERY_DEVICE,
+                    "uniq_id": payload["name"].format(rid, 1),
+                })
+                await self.mqtt_discovery(payload)
+                await asyncio.sleep(self.config.get("discovery_delay", 0.2))
+        
+        cmd = packet[6:8]
+        if state_packet:
+            # cmd=0x82 is normal state poll, door is locked
+            await self.update_state("door", "lock", rid, 1, "LOCKED")
+        elif cmd == "90":
+            # Door open ACK - door is unlocking
+            log(f"현관문 열림 (door_{rid:02d}_01)")
+            await self.update_state("door", "lock", rid, 1, "UNLOCKED")
+
     async def mqtt_discovery(self, payload: Dict[str, Any]):
         intg = payload.pop("_intg")
         topic = f"homeassistant/{intg}/ezville_wallpad/{payload['name']}/config"
@@ -631,6 +689,22 @@ class DeviceHandler:
             return None, None, ["", "NULL"]
         recvcmd = f"F7331{idx}C1"
         statcmd = [f"batch_{idx:02d}_{sid:02d}{subtopic}", "NULL"]
+        return sendcmd, recvcmd, statcmd
+
+    def generate_door_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
+        """현관문 열기 명령 생성
+        
+        Captured open command: F7 40 02 10 02 63 02 [XOR] [SUM]
+        - device_id=0x40, sub_id=0x02, cmd=0x10
+        - data: 02 63 02
+        """
+        if subtopic == "lock" and value == "UNLOCK":
+            # Door open command (captured from wallpad RS485 packet analysis)
+            sendcmd = checksum("F740021002630200" + "0000")
+            recvcmd = "F7400290"
+            statcmd = [f"door_{idx:02d}_{sid:02d}lock", "UNLOCKED"]
+        else:
+            return None, None, ["", "NULL"]
         return sendcmd, recvcmd, statcmd
 
     async def send_to_ew11(self, send_data: Dict[str, Any], comm_mode: str, socket_handler: SocketHandler):
