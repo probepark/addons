@@ -1,100 +1,111 @@
 {
-	"version": "0.0.10",
-	"slug": "ezville_wallpad",
-	"name": "EzVille RS485 Addon",
-	"description": "이지빌용 수정된 애드온입니다.",
-	"url": "https://github.com/probepark/addons",
-	"startup": "application",
-	"boot": "auto",
-	"arch": [ "armhf", "armv7", "aarch64", "amd64", "i386" ],
-
-	"auto_uart": true,
-	"map": [ "share:rw" ],
-
-	"options": {
-		"serial_mode": "socket",
-		"entrance_mode": "off",
-		"wallpad_mode": "on",
-		"intercom_mode": "off",
-		"serial": {
-			"port":  "/dev/ttyUSB0",
-			"baudrate": 9600,
-			"bytesize": 8,
-			"parity": "E",
-			"stopbits": 1
-		},
-		"socket": {
-			"address": "192.168.1.1",
-			"port": 8899
-		},
-		"sockets": [{
-			"address": "192.168.1.1",
-			"port": 8899,
-			"capabilities": "light,plug"
-		},{
-			"address": "192.168.1.2",
-			"port": 8899,
-			"capabilities": "fan,thermostat"
-		}],
-		"mqtt": {
-			"server": "127.0.0.1",
-			"port": 1883,
-			"need_login": true,
-			"user": "",
-			"passwd": "",
-			"discovery": true,
-			"prefix": "ezville"
-		},
-		"rs485": {
-			"max_retry": 20,
-			"early_response": 2,
-			"dump_time": 0,
-            "intercom_header": "A45A"
-		},
-		"log": {
-			"to_file": true,
-			"filename": "/share/ezville_wallpad.log"
-		}
-	},
-	"schema": {
-		"serial_mode": "list(serial|socket|sockets)",
-		"entrance_mode": "list(full|new|minimal|off)",
-		"wallpad_mode": "list(on|off)",
-		"intercom_mode": "list(on|off)",
-		"serial": {
-			"port":  "str",
-			"baudrate": "int",
-			"bytesize": "int(5,8)",
-			"parity": "list(E|O|N|M|S)",
-			"stopbits": "int(0,3)"
-		},
-		"socket": {
-			"address": "str?",
-			"port": "int?"
-		},
-		"sockets":[{
-			"address": "str?",
-			"port": "int?",
-			"capabilities": "str?"
-		}],
-		"mqtt": {
-			"server": "str",
-			"port": "int(0,65535)",
-			"need_login": "bool",
-			"user": "str?",
-			"passwd": "str?",
-			"discovery": "bool",
-			"prefix": "str"
-		},
-		"rs485": {
-			"max_retry": "int(0,100)",
-			"early_response": "int(0,2)",
-			"dump_time": "int",
-            "intercom_header": "str?"
-		},
-		"log": {
-			"to_file": "bool",
-			"filename": "str"
-		}
-	}
+  "version": "0.0.11",
+  "slug": "ezville_wallpad",
+  "name": "EzVille RS485 Addon",
+  "description": "이지빌용 수정된 애드온입니다.",
+  "url": "https://github.com/probepark/addons",
+  "startup": "application",
+  "boot": "auto",
+  "arch": [
+    "armhf",
+    "armv7",
+    "aarch64",
+    "amd64",
+    "i386"
+  ],
+  "auto_uart": true,
+  "map": [
+    "share:rw"
+  ],
+  "options": {
+    "serial_mode": "socket",
+    "entrance_mode": "off",
+    "wallpad_mode": "on",
+    "intercom_mode": "off",
+    "serial": {
+      "port": "/dev/ttyUSB0",
+      "baudrate": 9600,
+      "bytesize": 8,
+      "parity": "E",
+      "stopbits": 1
+    },
+    "socket": {
+      "address": "192.168.1.1",
+      "port": 8899
+    },
+    "sockets": [
+      {
+        "address": "192.168.1.1",
+        "port": 8899,
+        "capabilities": "light,plug"
+      },
+      {
+        "address": "192.168.1.2",
+        "port": 8899,
+        "capabilities": "fan,thermostat"
+      }
+    ],
+    "mqtt": {
+      "server": "127.0.0.1",
+      "port": 1883,
+      "need_login": true,
+      "user": "",
+      "passwd": "",
+      "discovery": true,
+      "prefix": "ezville"
+    },
+    "rs485": {
+      "max_retry": 20,
+      "early_response": 2,
+      "dump_time": 0,
+      "intercom_header": "A45A"
+    },
+    "log": {
+      "to_file": true,
+      "filename": "/share/ezville_wallpad.log"
+    }
+  },
+  "schema": {
+    "serial_mode": "list(serial|socket|sockets)",
+    "entrance_mode": "list(full|new|minimal|off)",
+    "wallpad_mode": "list(on|off)",
+    "intercom_mode": "list(on|off)",
+    "serial": {
+      "port": "str",
+      "baudrate": "int",
+      "bytesize": "int(5,8)",
+      "parity": "list(E|O|N|M|S)",
+      "stopbits": "int(0,3)"
+    },
+    "socket": {
+      "address": "str?",
+      "port": "int?"
+    },
+    "sockets": [
+      {
+        "address": "str?",
+        "port": "int?",
+        "capabilities": "str?"
+      }
+    ],
+    "mqtt": {
+      "server": "str",
+      "port": "int(0,65535)",
+      "need_login": "bool",
+      "user": "str?",
+      "passwd": "str?",
+      "discovery": "bool",
+      "prefix": "str"
+    },
+    "rs485": {
+      "max_retry": "int(0,100)",
+      "early_response": "int(0,2)",
+      "dump_time": "int",
+      "intercom_header": "str?"
+    },
+    "log": {
+      "to_file": "bool",
+      "filename": "str"
+    }
+  }
 }
