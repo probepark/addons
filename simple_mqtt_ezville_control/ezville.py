@@ -242,7 +242,7 @@ class MQTTHandler:
             self._reconnect_count = 0
             session_present = flags.get('session present', 0) if isinstance(flags, dict) else getattr(flags, 'session_present', 0)
             log(f"MQTT Broker 연결 성공 (session_present={session_present})")
-            topics = [(f"{HA_TOPIC}/#", 0), ("homeassistant/status", 0)]
+            topics = [(f"{HA_TOPIC}/#", 0), ("homeassistant/status", 0), (f"{HA_TOPIC}/debug/send", 0)]
             if self.config["mode"] in ["mixed", "mqtt"]:
                 topics.append((f"{EW11_TOPIC}/recv", 0))
             if self.config["mode"] == "mqtt":
@@ -462,6 +462,12 @@ class DeviceHandler:
         ack_packet = device_id in ACK_HEADER and cmd == ACK_HEADER[device_id][1]
 
         if not (state_packet or ack_packet):
+            # Log unknown packets to MQTT for debugging
+            if device_id not in STATE_HEADER and device_id not in ACK_HEADER:
+                self.mqtt.publish(
+                    f"{HA_TOPIC}/debug/unknown",
+                    f"device=0x{device_id} sub=0x{packet[4:6]} cmd=0x{cmd} | {packet}"
+                )
             return
 
         if self.msg_cache.get(packet[:10]) != packet[10:] or self.force_update:
@@ -747,6 +753,20 @@ class DeviceHandler:
                     topics = msg.topic.split("/")
                     if topics[0] == HA_TOPIC and topics[-1] == "command":
                         await self.process_ha(topics, msg.payload.decode("utf-8"))
+                    elif msg.topic == f"{HA_TOPIC}/debug/send":
+                        # Debug: send raw hex packet to RS485 via EW11
+                        raw_hex = msg.payload.decode("utf-8").strip()
+                        log(f"[DEBUG] Raw RS485 send: {raw_hex}")
+                        try:
+                            self.cmd_queue.put_nowait({
+                                "sendcmd": raw_hex,
+                                "recvcmd": "",
+                                "statcmd": ["", "NULL"]
+                            })
+                            self.mqtt.publish(f"{HA_TOPIC}/debug/result", f"sent: {raw_hex}")
+                        except Exception as e:
+                            log(f"[DEBUG] Send error: {e}", "ERROR")
+                            self.mqtt.publish(f"{HA_TOPIC}/debug/result", f"error: {e}")
                     elif topics[0] == EW11_TOPIC and topics[-1] == "recv":
                         await self.process_ew11(msg.payload.hex().upper())
                 except asyncio.TimeoutError:
