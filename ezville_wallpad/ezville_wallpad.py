@@ -211,7 +211,10 @@ class EzVilleSerial:
 class EzVilleSocket:
     def __init__(self, addr, port, capabilities="ALL"):
         self.capabilities = capabilities
+        self._addr = addr
+        self._port = port
         self._soc = socket.socket()
+        self._soc.settimeout(10)
         self._soc.connect((addr, port))
 
         self._recv_buf = bytearray()
@@ -634,8 +637,8 @@ def serial_get_header(conn):
             header_0 = header_1
         header_2 = conn.recv(1)[0]
         header_3 = conn.recv(1)[0]
-    except (OSError, serial.SerialException):
-        logger.error("ignore exception while reading header!")
+    except (OSError, serial.SerialException) as e:
+        logger.error("header 수신 중 예외 발생: %s", e)
         return 0, 0, 0, 0
     return header_0, header_1, header_2, header_3
 
@@ -676,6 +679,21 @@ def serial_send_command(conn):
         logger.info("send to device:  %s", cmd.hex())
         serial_ack[ack] = cmd
 
+# 헬스체크: 데이터 수신 모니터링
+_last_data_time = time.time()
+_health_check_running = True
+
+def health_check_thread():
+    """데이터 수신 여부 모니터링 — 5분간 데이터 없으면 경고"""
+    global _last_data_time, _health_check_running
+    while _health_check_running:
+        time.sleep(60)
+        silent = time.time() - _last_data_time
+        if silent > 300:
+            logger.warning("헬스체크: %.0f초 동안 데이터 수신 없음 — 연결 상태 확인 필요", silent)
+        elif silent > 120:
+            logger.info("헬스체크: %.0f초 동안 데이터 수신 없음", silent)
+
 # ★★★ 여기가 핵심: daemon()을 감싸는 함수 추가 ★★★
 def run_daemon(conn):
     """
@@ -695,7 +713,10 @@ def run_daemon(conn):
                     logger.info("소켓 재연결 시도...")
                     conn._soc.close()
                     conn._soc = socket.socket()
-                    conn._soc.connect((Options["socket"]["address"], Options["socket"]["port"]))
+                    conn._soc.settimeout(10)
+                    conn._soc.connect((conn._addr, conn._port))
+                    conn._recv_buf = bytearray()
+                    conn._pending_recv = 0
                 else:
                     logger.info("시리얼 재연결 시도...")
                     conn._ser.close()
@@ -706,6 +727,7 @@ def run_daemon(conn):
                 time.sleep(5)
 
 def daemon(conn):
+    global _last_data_time
     logger.info("start loop ...")
     scan_count = 0
     send_aggressive = False
@@ -716,6 +738,8 @@ def daemon(conn):
         if (header_0, header_1, header_2, header_3) == (0, 0, 0, 0):
             # 헤더를 못 읽었으면(에러), 재연결 루프로 빠지도록 예외 발생
             raise OSError("잘못된 헤더 수신(연결 끊김 또는 기타 에러)")
+
+        _last_data_time = time.time()
 
         if header_1 in STATE_HEADER and header_3 in STATE_HEADER[header_1]:
             device = STATE_HEADER[header_1][0]
@@ -736,7 +760,7 @@ def daemon(conn):
             if header_val in serial_ack:
                 serial_ack_command(header_val)
 
-        elif (header_3 == 0x81 or 0x8F or 0x0F) or send_aggressive:
+        elif header_3 in (0x81, 0x8F, 0x0F) or send_aggressive:
             scan_count += 1
             if serial_queue and not conn.check_pending_recv():
                 serial_send_command(conn=conn)
@@ -775,6 +799,10 @@ if __name__ == "__main__":
     init_option(sys.argv)
     init_logger_file()
     start_mqtt_loop()
+
+    # 헬스체크 스레드 시작
+    hc_thread = threading.Thread(target=health_check_thread, daemon=True)
+    hc_thread.start()
 
     if Options["serial_mode"] == "sockets":
         for _socket in Options["sockets"]:

@@ -735,8 +735,22 @@ class DeviceHandler:
         for attempt in range(retry_count):
             try:
                 if comm_mode == "mqtt":
-                    self.mqtt.publish(EW11_SEND_TOPIC, bytes.fromhex(send_data["sendcmd"]))
+                    # MQTT 연결 상태 확인
+                    if hasattr(self.mqtt.client, 'is_connected') and not self.mqtt.client.is_connected():
+                        log(f"MQTT 미연결 상태 — 재연결 시도 (attempt {attempt + 1})", "WARNING")
+                        try:
+                            self.mqtt.client.reconnect()
+                            await asyncio.sleep(1)
+                        except Exception as re:
+                            log(f"MQTT 재연결 실패: {re}", "ERROR")
+                            await asyncio.sleep(2)
+                            continue
+                    log(f"send to device:  {send_data['sendcmd']}")
+                    result = self.mqtt.publish(EW11_SEND_TOPIC, bytes.fromhex(send_data["sendcmd"]))
+                    if hasattr(result, 'rc') and result.rc != 0:
+                        log(f"MQTT publish 실패 (rc={result.rc}, attempt {attempt + 1})", "ERROR")
                 else:
+                    log(f"send to device:  {send_data['sendcmd']}")
                     await socket_handler.send(bytes.fromhex(send_data["sendcmd"]))
             except Exception as e:
                 log(f"명령 송신 오류 (attempt {attempt + 1}): {e}", "ERROR")

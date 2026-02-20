@@ -1,0 +1,64 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1771586398420,
+  "projectRoot": "/private/tmp/addons",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "ezville_wallpad": {
+      "path": "ezville_wallpad",
+      "purpose": null,
+      "fileCount": 11,
+      "lastAccessed": 1771586398414,
+      "keyFiles": [
+        "CHANGELOG.md",
+        "DOCS_LOVELACE.md",
+        "DOCS_PACKETS.md",
+        "Dockerfile",
+        "LICENSE"
+      ]
+    },
+    "simple_mqtt_ezville_control": {
+      "path": "simple_mqtt_ezville_control",
+      "purpose": null,
+      "fileCount": 7,
+      "lastAccessed": 1771586398415,
+      "keyFiles": [
+        "CHANGELOG.md",
+        "Dockerfile",
+        "PACKETS.md",
+        "README.md",
+        "config.json"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}
