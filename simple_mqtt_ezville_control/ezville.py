@@ -235,7 +235,9 @@ class MQTTHandler:
         self.msg_queue = asyncio.Queue(maxsize=1000)
         self.online = False
         self._reconnect_count = 0
-        self._last_message_time = time.time()
+        now = time.time()
+        self._last_message_time = now
+        self._last_ew11_message_time = now
 
     def on_connect(self, client, userdata, flags, rc, properties):
         if rc == 0:
@@ -268,7 +270,10 @@ class MQTTHandler:
         log(f"MQTT 구독 확인: mid={mid}, granted_qos={granted_qos}")
 
     def on_message(self, client, userdata, msg):
-        self._last_message_time = time.time()
+        now = time.time()
+        self._last_message_time = now
+        if msg.topic == f"{EW11_TOPIC}/recv":
+            self._last_ew11_message_time = now
         if not hasattr(self, '_msg_count'):
             self._msg_count = 0
             self._msg_count_by_topic = {}
@@ -312,6 +317,13 @@ class MQTTHandler:
     @property
     def seconds_since_last_message(self) -> float:
         return time.time() - self._last_message_time
+
+    @property
+    def seconds_since_last_ew11_message(self) -> float:
+        return time.time() - self._last_ew11_message_time
+
+    def reset_ew11_health_timer(self) -> None:
+        self._last_ew11_message_time = time.time()
 
 
 # 소켓 관리 (non-blocking asyncio 기반)
@@ -386,6 +398,10 @@ class SocketHandler:
             except (OSError, ConnectionResetError) as e:
                 log(f"Socket 수신 오류: {e}, 재연결", "ERROR")
                 await self.reconnect()
+
+    @property
+    def seconds_since_last_data(self) -> float:
+        return time.time() - self._last_data_time
 
     async def send(self, data: bytes):
         """비동기 송신"""
@@ -831,88 +847,84 @@ RECOVERY_INTERVAL = 300  # 5분간 데이터 없으면 복구 시도
 MAX_RECOVERY_ATTEMPTS = 3  # 복구 시도 횟수 (초과 시 프로세스 재시작)
 
 async def health_check_loop(mqtt_handler: MQTTHandler, socket_handler: SocketHandler, config: Config):
-    """주기적 헬스체크 — MQTT 및 Socket 연결 상태 모니터링 + 자동 복구"""
+    """주기적 헬스체크 — MQTT 및 EW11 수신 상태 모니터링 + 자동 복구"""
     recovery_attempts = 0
     last_recovery_time = 0
 
     while True:
         await asyncio.sleep(HEALTH_CHECK_INTERVAL)
-        silent_seconds = mqtt_handler.seconds_since_last_message
+        mqtt_silent_seconds = mqtt_handler.seconds_since_last_message
+        ew11_silent_seconds = mqtt_handler.seconds_since_last_ew11_message
+        if config["mode"] in ["socket", "mixed"]:
+            ew11_silent_seconds = min(ew11_silent_seconds, socket_handler.seconds_since_last_data)
+        recovery_silent_seconds = ew11_silent_seconds
 
-        # MQTT health
+        msg_count = getattr(mqtt_handler, '_msg_count', 0)
+        msg_by_topic = getattr(mqtt_handler, '_msg_count_by_topic', {})
+        mqtt_connected = mqtt_handler.client.is_connected() if hasattr(mqtt_handler.client, 'is_connected') else 'unknown'
+
+        # MQTT health: HA status/discovery traffic can continue while EW11 data is dead.
         if not mqtt_handler.online:
             log(f"헬스체크: MQTT 오프라인 (재연결 #{mqtt_handler._reconnect_count})", "WARNING")
-        elif silent_seconds > MAX_SILENT_PERIOD:
-            # 진단 정보 포함
-            msg_count = getattr(mqtt_handler, '_msg_count', 0)
-            msg_by_topic = getattr(mqtt_handler, '_msg_count_by_topic', {})
-            mqtt_connected = mqtt_handler.client.is_connected() if hasattr(mqtt_handler.client, 'is_connected') else 'unknown'
-            log(f"헬스체크: MQTT 메시지 {silent_seconds:.0f}초 동안 없음 | "
+        elif mqtt_silent_seconds > MAX_SILENT_PERIOD:
+            log(f"헬스체크: MQTT 메시지 {mqtt_silent_seconds:.0f}초 동안 없음 | "
                 f"총수신={msg_count}, 토픽별={msg_by_topic}, "
                 f"connected={mqtt_connected}, reconnect횟수={mqtt_handler._reconnect_count}",
                 "WARNING")
 
-        # 자동 복구: N초 동안 데이터 없으면 MQTT reconnect + 재구독
+        # EW11 health: use only RS485/EW11 data, not generic HA/MQTT traffic.
+        if ew11_silent_seconds > MAX_SILENT_PERIOD:
+            log(f"헬스체크: EW11 데이터 {ew11_silent_seconds:.0f}초 동안 없음 | "
+                f"MQTT총수신={msg_count}, 토픽별={msg_by_topic}, "
+                f"connected={mqtt_connected}, mode={config['mode']}", "WARNING")
+
+        # 자동 복구: N초 동안 EW11 데이터 없으면 MQTT 재구독 또는 프로세스 재시작.
         recovery_interval = config.get("recovery_interval", RECOVERY_INTERVAL)
-        if silent_seconds > recovery_interval and (time.time() - last_recovery_time) > recovery_interval:
+        if recovery_silent_seconds > recovery_interval and (time.time() - last_recovery_time) > recovery_interval:
             recovery_attempts += 1
             last_recovery_time = time.time()
 
             if recovery_attempts > config.get("max_recovery_attempts", MAX_RECOVERY_ATTEMPTS):
-                log(f"복구 {recovery_attempts-1}회 실패 — 프로세스 재시작", "ERROR")
+                log(f"EW11 복구 {recovery_attempts-1}회 실패 — 프로세스 재시작", "ERROR")
                 sys.exit(1)  # HA will auto-restart the addon
 
-            msg_count = getattr(mqtt_handler, '_msg_count', 0)
-            msg_by_topic = getattr(mqtt_handler, '_msg_count_by_topic', {})
             log(f"자동 복구 시도 #{recovery_attempts}: "
-                f"silent={silent_seconds:.0f}초, 총수신={msg_count}, 토픽별={msg_by_topic}, "
-                f"reconnect횟수={mqtt_handler._reconnect_count}", "WARNING")
+                f"ew11_silent={recovery_silent_seconds:.0f}초, mqtt_silent={mqtt_silent_seconds:.0f}초, "
+                f"총수신={msg_count}, 토픽별={msg_by_topic}, reconnect횟수={mqtt_handler._reconnect_count}", "WARNING")
 
-            # Step 1: EW11 TCP ping — 장치가 살아있는지 확인
-            ew11_host = config["ew11_server"]
-            ew11_port = config["ew11_port"]
-            try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(ew11_host, ew11_port), timeout=5
-                )
-                # 데이터 수신 시도 (1초 대기)
+            if config["mode"] in ["socket", "mixed"]:
                 try:
-                    probe_data = await asyncio.wait_for(reader.read(256), timeout=2)
-                    if probe_data:
-                        log(f"EW11 TCP 연결 확인: {ew11_host}:{ew11_port} 정상, "
-                            f"수신 {len(probe_data)}바이트: {probe_data[:20].hex()}", "INFO")
-                    else:
-                        log(f"EW11 TCP 연결 확인: {ew11_host}:{ew11_port} 연결됨, 데이터 없음", "WARNING")
-                except asyncio.TimeoutError:
-                    log(f"EW11 TCP 연결 확인: {ew11_host}:{ew11_port} 연결됨, 2초 내 데이터 없음", "WARNING")
-                writer.close()
-                await writer.wait_closed()
-            except Exception as e:
-                log(f"EW11 TCP 연결 실패: {e} — 장치 전원/네트워크 확인 필요", "ERROR")
+                    log("Socket 재연결 시작")
+                    await socket_handler.reconnect()
+                    mqtt_handler.reset_ew11_health_timer()
+                    log("Socket 재연결 완료", "INFO")
+                except Exception as e:
+                    log(f"Socket 재연결 실패: {e}", "ERROR")
+            else:
+                # MQTT EW11 mode has no independent TCP socket; force a full process restart
+                # if MQTT reconnect/resubscribe does not restore ew11/recv traffic quickly.
+                try:
+                    mqtt_connected_before = mqtt_handler.client.is_connected() if hasattr(mqtt_handler.client, 'is_connected') else 'unknown'
+                    log(f"MQTT 재연결 시작 (현재 connected={mqtt_connected_before})")
+                    mqtt_handler.client.disconnect()
+                    await asyncio.sleep(2)
+                    mqtt_handler.client.reconnect()
+                    await asyncio.sleep(3)  # on_connect 콜백 대기
+                    mqtt_connected_after = mqtt_handler.client.is_connected() if hasattr(mqtt_handler.client, 'is_connected') else 'unknown'
+                    log(f"MQTT 재연결 완료 (connected={mqtt_connected_after})", "INFO")
+                except Exception as e:
+                    log(f"MQTT 재연결 실패: {e}", "ERROR")
 
-            # Step 2: MQTT disconnect + reconnect (forces resubscription via on_connect)
-            try:
-                mqtt_connected_before = mqtt_handler.client.is_connected() if hasattr(mqtt_handler.client, 'is_connected') else 'unknown'
-                log(f"MQTT 재연결 시작 (현재 connected={mqtt_connected_before})")
-                mqtt_handler.client.disconnect()
-                await asyncio.sleep(2)
-                mqtt_handler.client.reconnect()
-                await asyncio.sleep(3)  # on_connect 콜백 대기
-                mqtt_connected_after = mqtt_handler.client.is_connected() if hasattr(mqtt_handler.client, 'is_connected') else 'unknown'
-                log(f"MQTT 재연결 완료 (connected={mqtt_connected_after})", "INFO")
-            except Exception as e:
-                log(f"MQTT 재연결 실패: {e}", "ERROR")
-
-        # 데이터 수신 복구 시 카운터 리셋
-        if silent_seconds < MAX_SILENT_PERIOD and recovery_attempts > 0:
-            log(f"데이터 수신 복구 성공 (시도 {recovery_attempts}회 후)", "INFO")
+        # EW11 데이터 수신 복구 시 카운터 리셋
+        if ew11_silent_seconds < MAX_SILENT_PERIOD and recovery_attempts > 0:
+            log(f"EW11 데이터 수신 복구 성공 (시도 {recovery_attempts}회 후)", "INFO")
             recovery_attempts = 0
 
-        # Reboot control (기존 옵션 호환)
+        # Reboot control (기존 옵션 호환): generic MQTT가 아니라 EW11 침묵 기준으로 재시작.
         if config.get("reboot_control", False):
             reboot_delay = config.get("reboot_delay", 300)
-            if silent_seconds > reboot_delay:
-                log(f"MQTT {reboot_delay}초 동안 메시지 없음 — 프로세스 재시작", "ERROR")
+            if ew11_silent_seconds > reboot_delay:
+                log(f"EW11 데이터 {reboot_delay}초 동안 없음 — 프로세스 재시작", "ERROR")
                 sys.exit(1)  # HA will auto-restart the addon
 
 
