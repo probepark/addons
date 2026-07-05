@@ -1,5 +1,8 @@
 수정 사항 Changelog
 
+v 0.0.23
+- MQTT mode + EW11 TCP fallback 환경에서 조명/월패드 명령도 MQTT ew11/send가 아니라 실제 연결된 TCP socket으로 전송
+
 v 0.0.22
 - EW11 TCP fallback에서 짧은 plug 상태 패킷이 들어와도 수신 루프가 오류 폭주하지 않도록 방어
 

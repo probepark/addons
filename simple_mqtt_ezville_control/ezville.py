@@ -943,6 +943,19 @@ def should_start_socket_recv(config: Config) -> bool:
     return mode in ["socket", "mixed"] or (mode == "mqtt" and config.get("auto_socket_fallback", True))
 
 
+def command_transport_mode(config: Config) -> str:
+    """Return the transport used for wallpad commands.
+
+    When MQTT mode uses direct EW11 TCP receive fallback, commands must use the
+    same live TCP connection. Otherwise we can receive real wallpad state while
+    publishing commands to a dead or ignored ew11/send MQTT bridge.
+    """
+    mode = config["mode"]
+    if mode == "mqtt" and should_start_socket_recv(config):
+        return "socket"
+    return mode
+
+
 async def main(config: Config):
     mqtt_handler = MQTTHandler(config)
     socket_handler = SocketHandler(
@@ -956,14 +969,17 @@ async def main(config: Config):
     comm_mode = config["mode"]
     await mqtt_handler.start()
 
+    socket_fallback = should_start_socket_recv(config)
+    command_mode = command_transport_mode(config)
+    if comm_mode == "mqtt" and socket_fallback:
+        log("MQTT 모드에서 EW11 TCP 수신/명령 fallback 활성화")
+
     tasks = [
         asyncio.create_task(device_handler.state_update_loop(mqtt_handler.msg_queue)),
-        asyncio.create_task(device_handler.command_loop(comm_mode, socket_handler)),
+        asyncio.create_task(device_handler.command_loop(command_mode, socket_handler)),
         asyncio.create_task(health_check_loop(mqtt_handler, socket_handler, config)),
     ]
-    if should_start_socket_recv(config):
-        if comm_mode == "mqtt":
-            log("MQTT 모드에서 EW11 TCP 수신 fallback 활성화")
+    if socket_fallback:
         tasks.append(asyncio.create_task(socket_handler.recv_loop(mqtt_handler.msg_queue)))
 
     # Graceful shutdown

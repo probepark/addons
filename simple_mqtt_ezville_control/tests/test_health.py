@@ -160,6 +160,16 @@ class SocketFallbackTest(unittest.TestCase):
 
         self.assertFalse(ezville.should_start_socket_recv(config))
 
+    def test_mqtt_mode_with_socket_fallback_sends_commands_over_socket(self):
+        config = {"mode": "mqtt"}
+
+        self.assertEqual(ezville.command_transport_mode(config), "socket")
+
+    def test_mqtt_mode_without_socket_fallback_sends_commands_over_mqtt(self):
+        config = {"mode": "mqtt", "auto_socket_fallback": False}
+
+        self.assertEqual(ezville.command_transport_mode(config), "mqtt")
+
 
 class FakePublisher:
     def publish(self, _topic, _payload):
