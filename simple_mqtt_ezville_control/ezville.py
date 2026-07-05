@@ -855,7 +855,7 @@ async def health_check_loop(mqtt_handler: MQTTHandler, socket_handler: SocketHan
         await asyncio.sleep(HEALTH_CHECK_INTERVAL)
         mqtt_silent_seconds = mqtt_handler.seconds_since_last_message
         ew11_silent_seconds = mqtt_handler.seconds_since_last_ew11_message
-        if config["mode"] in ["socket", "mixed"]:
+        if should_start_socket_recv(config):
             ew11_silent_seconds = min(ew11_silent_seconds, socket_handler.seconds_since_last_data)
         recovery_silent_seconds = ew11_silent_seconds
 

@@ -1,5 +1,8 @@
 수정 사항 Changelog
 
+v 0.0.21
+- EW11 TCP fallback 활성화 시 헬스체크도 socket 수신 타이머를 보도록 수정
+
 v 0.0.20
 - MQTT mode에서도 EW11 TCP 수신 fallback을 기본 활성화해 ew11/recv MQTT가 멈춰도 상태 패킷을 직접 수신
 

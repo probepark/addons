@@ -138,6 +138,7 @@ class HealthLoopTest(unittest.IsolatedAsyncioTestCase):
         mqtt_handler = FakeMqttHandler(mqtt_silent=0, ew11_silent=600)
         config = {
             "mode": "mqtt",
+            "auto_socket_fallback": False,
             "recovery_interval": 1,
             "max_recovery_attempts": 0,
             "reboot_control": False,
