@@ -148,5 +148,17 @@ class HealthLoopTest(unittest.IsolatedAsyncioTestCase):
                 await ezville.health_check_loop(mqtt_handler, FakeSocketHandler(), config)
 
 
+class SocketFallbackTest(unittest.TestCase):
+    def test_mqtt_mode_starts_socket_receive_fallback_by_default(self):
+        config = {"mode": "mqtt"}
+
+        self.assertTrue(ezville.should_start_socket_recv(config))
+
+    def test_mqtt_mode_socket_receive_fallback_can_be_disabled(self):
+        config = {"mode": "mqtt", "auto_socket_fallback": False}
+
+        self.assertFalse(ezville.should_start_socket_recv(config))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 {
   "name": "MQTT 기반 Simple EzVille Wallpad Control",
-  "version": "0.0.19",
+  "version": "0.0.20",
   "slug": "simple_mqtt_ezville_control",
   "url": "https://github.com/probepark/addons",
   "description": "MQTT 통신을 활용한 간단화된 EzVille 월패드 컨트롤러",
@@ -42,6 +42,7 @@
     "force_update_duration": 2,
     "recovery_interval": 300,
     "max_recovery_attempts": 3,
+    "auto_socket_fallback": true,
     "reboot_control": false,
     "reboot_delay": 300,
     "ew11_buffer_size": 128,
@@ -73,6 +74,7 @@
     "force_update_duration": "float",
     "recovery_interval": "float",
     "max_recovery_attempts": "int",
+    "auto_socket_fallback": "bool",
     "reboot_control": "bool",
     "reboot_delay": "float",
     "ew11_buffer_size": "int",

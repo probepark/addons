@@ -929,6 +929,12 @@ async def health_check_loop(mqtt_handler: MQTTHandler, socket_handler: SocketHan
 
 
 # 메인 루프
+def should_start_socket_recv(config: Config) -> bool:
+    """Return whether TCP socket receive should run for RS485 state fallback."""
+    mode = config["mode"]
+    return mode in ["socket", "mixed"] or (mode == "mqtt" and config.get("auto_socket_fallback", True))
+
+
 async def main(config: Config):
     mqtt_handler = MQTTHandler(config)
     socket_handler = SocketHandler(
@@ -947,7 +953,9 @@ async def main(config: Config):
         asyncio.create_task(device_handler.command_loop(comm_mode, socket_handler)),
         asyncio.create_task(health_check_loop(mqtt_handler, socket_handler, config)),
     ]
-    if comm_mode in ["socket", "mixed"]:
+    if should_start_socket_recv(config):
+        if comm_mode == "mqtt":
+            log("MQTT 모드에서 EW11 TCP 수신 fallback 활성화")
         tasks.append(asyncio.create_task(socket_handler.recv_loop(mqtt_handler.msg_queue)))
 
     # Graceful shutdown
