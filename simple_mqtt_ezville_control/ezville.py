@@ -493,7 +493,7 @@ class DeviceHandler:
                 try:
                     await handler(packet, state_packet)
                 except Exception as e:
-                    log(f"패킷 처리 오류 ({device_name}): {e}", "ERROR")
+                    log(f"패킷 처리 오류 ({device_name}, packet={packet}): {e}", "ERROR")
             if state_packet:
                 self.msg_cache[packet[:10]] = packet[10:]
 
@@ -543,7 +543,6 @@ class DeviceHandler:
                 self.discovery_list.append(name)
                 for p in DISCOVERY_PAYLOAD["plug"]:
                     payload = p.copy()
-                    intg_name = name if "_intg" not in ["binary_sensor", "sensor"] else f"{name}_{p.get('name', '').split('_')[-1]}"
                     payload.update({
                         "~": f"ezville/{name}",
                         "name": payload["name"].format(rid, id),
@@ -553,9 +552,18 @@ class DeviceHandler:
                     await self.mqtt_discovery(payload)
                     await asyncio.sleep(self.config.get("discovery_delay", 0.2))
             offset = 10 + (id - 1) * 8
-            onoff = "ON" if int(packet[offset:offset + 2], 16) & 1 else "OFF"
-            auto = "ON" if int(packet[offset:offset + 2], 16) & 2 else "OFF"
-            current = int(packet[offset + 2:offset + 4], 16) * 256 + int(packet[offset + 4:offset + 6], 16)
+            state_hex = packet[offset:offset + 2]
+            current_hi_hex = packet[offset + 2:offset + 4]
+            current_lo_hex = packet[offset + 4:offset + 6]
+            if len(state_hex) < 2:
+                log(f"plug_{rid:02d}_{id:02d} 상태 바이트 없음, packet={packet}", "WARNING")
+                continue
+            state_byte = int(state_hex, 16)
+            onoff = "ON" if state_byte & 1 else "OFF"
+            auto = "ON" if state_byte & 2 else "OFF"
+            current = 0
+            if len(current_hi_hex) == 2 and len(current_lo_hex) == 2:
+                current = int(current_hi_hex, 16) * 256 + int(current_lo_hex, 16)
             await self.update_state("plug", "power", rid, id, onoff)
             await self.update_state("plug", "auto", rid, id, auto)
             await self.update_state("plug", "current", rid, id, str(current))

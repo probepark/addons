@@ -161,5 +161,24 @@ class SocketFallbackTest(unittest.TestCase):
         self.assertFalse(ezville.should_start_socket_recv(config))
 
 
+class FakePublisher:
+    def publish(self, _topic, _payload):
+        pass
+
+
+class PlugPacketTest(unittest.IsolatedAsyncioTestCase):
+    async def test_short_plug_packet_does_not_raise(self):
+        handler = ezville.DeviceHandler.__new__(ezville.DeviceHandler)
+        handler.discovery_list = [f"plug_01_{i:02d}" for i in range(1, 9)]
+        handler.device_state = {}
+        handler.mqtt = FakePublisher()
+        handler.config = {"discovery_delay": 0}
+
+        await handler.handle_plug("F7390181040001010079F4", True)
+
+        self.assertEqual(handler.device_state["plug_01_01power"], "OFF")
+        self.assertEqual(handler.device_state["plug_01_02power"], "ON")
+
+
 if __name__ == "__main__":
     unittest.main()

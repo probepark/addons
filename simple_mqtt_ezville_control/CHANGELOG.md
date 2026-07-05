@@ -1,5 +1,8 @@
 수정 사항 Changelog
 
+v 0.0.22
+- EW11 TCP fallback에서 짧은 plug 상태 패킷이 들어와도 수신 루프가 오류 폭주하지 않도록 방어
+
 v 0.0.21
 - EW11 TCP fallback 활성화 시 헬스체크도 socket 수신 타이머를 보도록 수정
 
