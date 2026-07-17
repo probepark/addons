@@ -678,8 +678,6 @@ class DeviceHandler:
 
     def generate_light_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
         pwr = "01" if value == "ON" else "00"
-        if idx == 1 and sid in [1, 2] and pwr == "01":
-            pwr = "F1"
         sendcmd = checksum(f"F70E1{idx}41030{sid}{pwr}000000")
         recvcmd = f"F70E1{idx}C1"
         statcmd = [f"light_{idx:02d}_{sid:02d}power", value]
