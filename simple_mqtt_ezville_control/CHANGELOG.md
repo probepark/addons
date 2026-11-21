@@ -1,5 +1,8 @@
 수정 사항 Changelog
 
+v 0.0.27
+- HA 재시작(`homeassistant/status` = online) 후 장치 재등록·상태 재발행. 이전엔 discovery/state를 retain 없이 한 번만 보내서 HA Core 재시작마다 월패드 엔티티가 unavailable로 남고 애드온을 재시작해야 복구됐음
+
 v 0.0.26
 - 난방 비트 순서 수정: 1번 방 = BIT0 (실기에서 5번 방 난방을 켜고 BIT4 변화로 확인). 0.0.25는 순서가 뒤집혀 명령 성공을 실패로 판정하고 30회 재전송했음
 

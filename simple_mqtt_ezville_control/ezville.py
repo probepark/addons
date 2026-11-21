@@ -240,6 +240,7 @@ class MQTTHandler:
         self.config = config
         self.msg_queue = asyncio.Queue(maxsize=1000)
         self.online = False
+        self.ha_online_epoch = 0
         self._reconnect_count = 0
         now = time.time()
         self._last_message_time = now
@@ -289,6 +290,9 @@ class MQTTHandler:
         if msg.topic == "homeassistant/status":
             status = msg.payload.decode("utf-8")
             self.online = (status == "online")
+            if self.online:
+                # HA restarted: its MQTT entities exist again only after discovery + state are re-sent.
+                self.ha_online_epoch = getattr(self, "ha_online_epoch", 0) + 1
             log(f"MQTT Integration {'온라인' if self.online else '오프라인'}")
         else:
             try:
@@ -477,7 +481,17 @@ class DeviceHandler:
             else:
                 k += 1
 
+    def resync_after_ha_restart(self):
+        epoch = getattr(self.mqtt, "ha_online_epoch", 0)
+        if epoch != getattr(self, "_ha_epoch_seen", epoch):
+            self.discovery_list.clear()
+            self.device_state.clear()
+            self.msg_cache.clear()
+            log("HA 재시작 감지: 장치 재등록·상태 재발행")
+        self._ha_epoch_seen = epoch
+
     async def handle_packet(self, packet: str):
+        self.resync_after_ha_restart()
         device_id = packet[2:4]
         cmd = packet[6:8]
         state_packet = device_id in STATE_HEADER and cmd == STATE_HEADER[device_id][1]
