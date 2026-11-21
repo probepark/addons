@@ -520,6 +520,7 @@ class DeviceHandler:
     async def handle_thermostat(self, packet: str, state_packet: bool):
         # PACKETS.md: data = [error][heating bits][away bits][reserved][reserved] + (set, cur) per room.
         # Group byte high nibble = group; low nibble = room (F = all), so it is not part of the entity id.
+        # Room 1 is bit 0: verified on 2026-11-21 by turning room 5 on and watching bit 4 (and its set temp) change.
         grp = int(packet[4], 16)
         data_len = int(packet[8:10], 16)
         room_count = (data_len - 5) // 2
@@ -537,7 +538,7 @@ class DeviceHandler:
             offset = 20 + (room - 1) * 4
             set_temp = thermostat_temp(packet[offset:offset + 2])
             cur_temp = thermostat_temp(packet[offset + 2:offset + 4])
-            mode = "heat" if (heating_bits >> (room_count - room)) & 1 else "off"
+            mode = "heat" if (heating_bits >> (room - 1)) & 1 else "off"
             await self.update_state("thermostat", "power", grp, room, mode)
             await self.update_state("thermostat", "setTemp", grp, room, set_temp)
             await self.update_state("thermostat", "curTemp", grp, room, cur_temp)

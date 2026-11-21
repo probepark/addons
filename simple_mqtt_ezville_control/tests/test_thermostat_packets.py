@@ -43,14 +43,14 @@ class ThermostatStatePacketTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.device_state["thermostat_01_05curTemp"], "22")
         self.assertNotIn("thermostat_15_01power", handler.device_state)
 
-    async def test_heating_bits_map_room_one_to_highest_bit(self):
-        # PACKETS.md example: heating bits 0B = rooms 2, 4, 5.
+    async def test_heating_bits_map_room_one_to_lowest_bit(self):
+        # PACKETS.md example: heating bits 0B = rooms 1, 2, 4; away bits 14 = rooms 3, 5 (both set to 5).
         handler = make_handler()
 
         await handler.handle_thermostat("F7361F810F800B1400001415181805160D140500C1D6", True)
 
         modes = [handler.device_state[f"thermostat_01_{i:02d}power"] for i in range(1, 6)]
-        self.assertEqual(modes, ["off", "heat", "off", "heat", "heat"])
+        self.assertEqual(modes, ["heat", "heat", "off", "heat", "off"])
         self.assertEqual(handler.device_state["thermostat_01_01setTemp"], "20")
         self.assertEqual(handler.device_state["thermostat_01_01curTemp"], "21")
 
