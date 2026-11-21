@@ -166,6 +166,12 @@ ACK_HEADER = {
     if "ack" in code
 }
 
+def thermostat_temp(hex_byte: str) -> str:
+    raw = int(hex_byte, 16)
+    temp = (raw & 0x7F) + (0.5 if raw & 0x80 else 0)
+    return str(int(temp)) if temp == int(temp) else str(temp)
+
+
 CONFIG_DIR = "/data"
 HA_TOPIC = "ezville"
 STATE_TOPIC = f"{HA_TOPIC}/{{}}/{{}}/state"
@@ -512,27 +518,29 @@ class DeviceHandler:
             await self.update_state("light", "power", rid, id, onoff)
 
     async def handle_thermostat(self, packet: str, state_packet: bool):
-        rid = int(packet[5], 16)
-        slc = int(packet[8:10], 16)
-        for id in range(1, slc):
-            name = f"thermostat_{rid:02d}_{id:02d}"
+        # PACKETS.md: data = [error][heating bits][away bits][reserved][reserved] + (set, cur) per room.
+        # Group byte high nibble = group; low nibble = room (F = all), so it is not part of the entity id.
+        grp = int(packet[4], 16)
+        data_len = int(packet[8:10], 16)
+        room_count = (data_len - 5) // 2
+        if room_count <= 0:
+            return
+        heating_bits = int(packet[12:14], 16)
+        for room in range(1, room_count + 1):
+            name = f"thermostat_{grp:02d}_{room:02d}"
             if name not in self.discovery_list:
                 self.discovery_list.append(name)
                 payload = DISCOVERY_PAYLOAD["thermostat"][0].copy()
                 payload.update({"~": f"ezville/{name}", "name": name, "device": DISCOVERY_DEVICE, "uniq_id": name})
                 await self.mqtt_discovery(payload)
                 await asyncio.sleep(self.config.get("discovery_delay", 0.2))
-            offset = 10 + (id - 1) * 8
-            onoff_byte = int(packet[offset:offset + 2], 16)
-            set_temp = int(packet[offset + 2:offset + 4], 16)
-            cur_temp = int(packet[offset + 4:offset + 6], 16)
-            if onoff_byte & 0x01:
-                mode = "heat"
-            else:
-                mode = "off"
-            await self.update_state("thermostat", "power", rid, id, mode)
-            await self.update_state("thermostat", "setTemp", rid, id, str(set_temp))
-            await self.update_state("thermostat", "curTemp", rid, id, str(cur_temp))
+            offset = 20 + (room - 1) * 4
+            set_temp = thermostat_temp(packet[offset:offset + 2])
+            cur_temp = thermostat_temp(packet[offset + 2:offset + 4])
+            mode = "heat" if (heating_bits >> (room_count - room)) & 1 else "off"
+            await self.update_state("thermostat", "power", grp, room, mode)
+            await self.update_state("thermostat", "setTemp", grp, room, set_temp)
+            await self.update_state("thermostat", "curTemp", grp, room, cur_temp)
 
     async def handle_plug(self, packet: str, state_packet: bool):
         rid = int(packet[5], 16)
@@ -684,20 +692,18 @@ class DeviceHandler:
         return sendcmd, recvcmd, statcmd
 
     def generate_thermostat_cmd(self, idx: int, sid: int, subtopic: str, value: str) -> Tuple[str, str, List[str]]:
+        # Commands address one room as group byte {idx}{sid}, data length 1 (PACKETS.md).
         if subtopic == "power":
-            if value == "heat":
-                sendcmd = checksum(f"F7361{idx}43020{sid}01000000")
-            elif value == "off":
-                sendcmd = checksum(f"F7361{idx}43020{sid}04000000")
-            else:
-                sendcmd = checksum(f"F7361{idx}43020{sid}00000000")
-            recvcmd = f"F7361{idx}C3"
+            pwr = "01" if value == "heat" else "00"
+            sendcmd = checksum(f"F736{idx:X}{sid:X}4301{pwr}0000")
+            recvcmd = f"F736{idx:X}{sid:X}C3"
             statcmd = [f"thermostat_{idx:02d}_{sid:02d}power", value]
         elif subtopic == "setTemp":
-            temp = int(float(value))
-            sendcmd = checksum(f"F7361{idx}44020{sid}{temp:02X}000000")
-            recvcmd = f"F7361{idx}C4"
-            statcmd = [f"thermostat_{idx:02d}_{sid:02d}setTemp", str(temp)]
+            temp = float(value)
+            raw = int(temp) | (0x80 if temp - int(temp) >= 0.5 else 0)
+            sendcmd = checksum(f"F736{idx:X}{sid:X}4401{raw:02X}0000")
+            recvcmd = f"F736{idx:X}{sid:X}C4"
+            statcmd = [f"thermostat_{idx:02d}_{sid:02d}setTemp", thermostat_temp(f"{raw:02X}")]
         else:
             return None, None, ["", "NULL"]
         return sendcmd, recvcmd, statcmd
