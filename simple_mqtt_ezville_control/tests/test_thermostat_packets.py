@@ -59,6 +59,26 @@ class ThermostatStatePacketTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ezville.thermostat_temp("17"), "23")
 
 
+class HaRestartResyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_birth_message_forces_rediscovery_and_state(self):
+        handler = make_handler()
+        handler.mqtt.ha_online_epoch = 0
+        handler.msg_cache = {}
+        published = []
+        handler.mqtt.publish = lambda topic, payload: published.append(topic)
+        packet = "F7361F810F00001F0000051605170516051605165DE0"
+
+        await handler.handle_packet(packet)
+        first = len(published)
+        await handler.handle_packet(packet)
+        self.assertEqual(len(published), first)  # unchanged packet is deduplicated
+
+        handler.mqtt.ha_online_epoch += 1  # homeassistant/status = online
+        await handler.handle_packet(packet)
+        self.assertIn("homeassistant/climate/ezville_wallpad/thermostat_01_01/config", published[first:])
+        self.assertIn("ezville/thermostat_01_01/curTemp/state", published[first:])
+
+
 class ThermostatCommandTest(unittest.TestCase):
     def setUp(self):
         self.handler = object.__new__(ezville.DeviceHandler)
